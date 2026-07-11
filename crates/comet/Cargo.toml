@@ -1,0 +1,9 @@
+[package]
+name = "comet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+comet-core = { path = "../comet-core" }
+comet-renderer = { path = "../comet-renderer" }
+comet-ui = { path = "../comet-ui" }

@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "crates/comet-core",
+    "crates/comet-renderer",
+    "crates/comet-ui",
+    "crates/comet"
+]
+resolver = "2"
