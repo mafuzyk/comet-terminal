@@ -7,6 +7,7 @@ edition = "2024"
 comet-core = { path = "../comet-core" }
 comet-pty = { path = "../comet-pty" }
 comet-renderer = { path = "../comet-renderer" }
+comet-config = { path = "../comet-config" }
 winit = "0.30"
 wgpu = "23"
 raw-window-handle = "0.6"

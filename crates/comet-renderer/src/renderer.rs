@@ -1,7 +1,7 @@
 //! Main renderer module.
 
 use crate::backend::{HasWindowHandle, RenderBackend, BackendFactory, BackendType};
-use crate::colors::ColorPalette;
+use crate::colors::{ColorPalette, Rgba};
 use crate::cursor::CursorRenderer;
 use crate::damage::DamageTracker;
 use crate::error::{RendererError, RendererResult};
@@ -23,6 +23,17 @@ pub struct RendererConfig {
     pub padding_y: f32,
     pub cursor_blink: bool,
     pub cursor_shape: crate::cursor::CursorShape,
+    /// Optional custom colors. If None, uses theme defaults.
+    pub colors: Option<CustomColors>,
+}
+
+/// Custom color configuration for the renderer.
+#[derive(Debug, Clone)]
+pub struct CustomColors {
+    pub background: String,  // hex string like "#1e1e2e"
+    pub foreground: String,
+    pub cursor: String,
+    pub selection: String,
 }
 
 impl Default for RendererConfig {
@@ -37,6 +48,18 @@ impl Default for RendererConfig {
             padding_y: 2.0,
             cursor_blink: true,
             cursor_shape: crate::cursor::CursorShape::Block,
+            colors: None,
+        }
+    }
+}
+
+impl RendererConfig {
+    /// Resolve the color palette from config or theme.
+    pub fn resolve_colors(&self) -> ColorPalette {
+        if let Some(c) = &self.colors {
+            ColorPalette::from_hex(&c.background, &c.foreground, &c.cursor, &c.selection)
+        } else {
+            ColorPalette::from_theme(&self.theme)
         }
     }
 }
@@ -88,13 +111,6 @@ impl Renderer {
         // Create font system
         let font_system = Arc::new(FontSystem::new()?);
 
-        // Create cursor renderer
-        let cursor_renderer = Arc::new(CursorRenderer::new(
-            Arc::new(DamageTracker::new(80, 24)),
-            10.0,
-            20.0,
-        ));
-
         // Create damage tracker
         let damage_tracker = Arc::new(DamageTracker::new(80, 24));
 
@@ -108,8 +124,15 @@ impl Renderer {
             RenderMetrics::new(font_metrics, cell_size, config.dpi_scale, 24, 80)
         ));
 
+        // Create cursor renderer
+        let cursor_renderer = Arc::new(CursorRenderer::new(
+            Arc::new(DamageTracker::new(80, 24)),
+            cell_size.width as f32,
+            cell_size.height as f32,
+        ));
+
         // Create color palette
-        let colors = Arc::new(ColorPalette::from_theme(&config.theme));
+        let colors = Arc::new(config.resolve_colors());
 
         Ok(Self {
             config,
@@ -167,6 +190,8 @@ impl Renderer {
                 height / m.cell_size.height.max(1),
             );
         });
+        let cell_size = self.metrics.cell_size();
+        self.cursor_renderer.set_cell_size(cell_size.width as f32, cell_size.height as f32);
         Ok(())
     }
 

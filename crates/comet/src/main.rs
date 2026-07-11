@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use comet_config::{load_config, ensure_default_themes};
 use comet_ui::TerminalApp;
 use winit::{
     application::ApplicationHandler,
@@ -15,6 +16,14 @@ struct CometApp {
 impl ApplicationHandler for CometApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.app.is_none() {
+            // Ensure default themes exist
+            if let Err(e) = ensure_default_themes() {
+                eprintln!("Failed to initialize default themes: {}", e);
+            }
+            let config = load_config().unwrap_or_else(|e| {
+                eprintln!("Failed to load config: {}", e);
+                comet_config::Config::default()
+            });
             let window = Arc::new(
                 event_loop
                     .create_window(
@@ -24,7 +33,7 @@ impl ApplicationHandler for CometApp {
                     )
                     .expect("Failed to create window"),
             );
-            let terminal_app = TerminalApp::new(window, 14);
+            let terminal_app = TerminalApp::new(window, config);
             self.app = Some(terminal_app);
         }
     }
@@ -59,9 +68,9 @@ impl ApplicationHandler for CometApp {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(mut app) = self.app.take() {
-            let _ = app.pty_mut().kill();
-        }
+        // Drop the TerminalApp — its Drop impl handles PTY kill, thread
+        // join, and child reaping.
+        self.app.take();
     }
 }
 

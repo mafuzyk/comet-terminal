@@ -48,6 +48,20 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 }
 "#;
 
+/// Cursor fragment shader — renders solid color, ignores atlas texture.
+const CURSOR_FRAGMENT_SHADER: &str = r#"
+struct FragmentInput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) tex_coord: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@fragment
+fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
+    return input.color;
+}
+"#;
+
 const FRAGMENT_SHADER: &str = r#"
 @group(0) @binding(1) var atlas_texture: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
@@ -237,6 +251,10 @@ pub struct WgpuBackend {
     bind_group_layout: Option<wgpu::BindGroupLayout>,
     uniform_buffer: Option<wgpu::Buffer>,
 
+    // Cursor pipeline (solid color, no atlas texture)
+    cursor_pipeline: Option<wgpu::RenderPipeline>,
+    cursor_bind_group_layout: Option<wgpu::BindGroupLayout>,
+
     // Per-frame resources
     frame: Mutex<Option<FrameResources>>,
     /// Set when a non-fatal SurfaceError occurs; subsequent frame methods skip.
@@ -258,6 +276,10 @@ impl WgpuBackend {
             render_pipeline: None,
             bind_group_layout: None,
             uniform_buffer: None,
+            // Cursor pipeline
+            cursor_pipeline: None,
+            cursor_bind_group_layout: None,
+            // Per-frame resources
             frame: Mutex::new(None),
             frame_skipped: false,
             pipelines: Mutex::new(HashMap::new()),
@@ -415,6 +437,86 @@ impl WgpuBackend {
 
         Ok(())
     }
+
+    /// Creates the cursor render pipeline (solid color, no texture sample).
+    fn create_cursor_pipeline(&mut self, format: TextureFormat) -> RendererResult<()> {
+        let ctx = self.ctx()?;
+
+        let vs_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Cursor Vertex Shader"),
+            source: wgpu::ShaderSource::Wgsl(VERTEX_SHADER.into()),
+        });
+
+        let fs_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Cursor Fragment Shader"),
+            source: wgpu::ShaderSource::Wgsl(CURSOR_FRAGMENT_SHADER.into()),
+        });
+
+        let bind_group_layout = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Cursor Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Cursor Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let render_pipeline = ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Cursor Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &vs_module,
+                entry_point: Some("vs_main"),
+                buffers: &[crate::atlas::GlyphVertex::desc()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &fs_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        self.cursor_bind_group_layout = Some(bind_group_layout);
+        self.cursor_pipeline = Some(render_pipeline);
+
+        Ok(())
+    }
 }
 
 impl Default for WgpuBackend {
@@ -444,6 +546,7 @@ impl RenderBackend for WgpuBackend {
         self.config.height = height;
         self.ctx = Some(ctx);
         self.create_pipeline(format)?;
+        self.create_cursor_pipeline(format)?;
 
         Ok(())
     }
@@ -645,21 +748,51 @@ impl RenderBackend for WgpuBackend {
                     timestamp_writes: None,
                 });
 
-            if vertices.is_empty() {
-                return Ok(());
+            // Update cursor renderer position from terminal
+        let (cursor_col, cursor_row) = terminal.cursor().position();
+        context.cursor_renderer.set_position(cursor_col as u32, cursor_row as u32);
+
+        // ── Render glyphs ────────────────────────────────────────────
+            if !vertices.is_empty() {
+                let vertex_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Frame Glyph Vertices"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                render_pass.set_pipeline(render_pipeline);
+                render_pass.set_bind_group(0, &bind_group, &[]);
+                render_pass.set_vertex_buffer(0, vertex_buf.slice(..));
+                render_pass.draw(0..vertices.len() as u32, 0..1);
             }
 
-            // Create vertex buffer for this frame
-            let vertex_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Frame Glyph Vertices"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            // ── Render cursor (solid color overlay) ──────────────────────
+            if context.cursor_renderer.should_render() {
+                let cursor_vertices = context.cursor_renderer.get_vertices();
+                if !cursor_vertices.is_empty() {
+                    let cursor_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Cursor Bind Group"),
+                        layout: self.cursor_bind_group_layout.as_ref().unwrap(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: uniform_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
 
-            render_pass.set_pipeline(render_pipeline);
-            render_pass.set_bind_group(0, &bind_group, &[]);
-            render_pass.set_vertex_buffer(0, vertex_buf.slice(..));
-            render_pass.draw(0..vertices.len() as u32, 0..1);
+                    let cursor_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Frame Cursor Vertices"),
+                        contents: bytemuck::cast_slice(&cursor_vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+
+                    render_pass.set_pipeline(self.cursor_pipeline.as_ref().unwrap());
+                    render_pass.set_bind_group(0, &cursor_bg, &[]);
+                    render_pass.set_vertex_buffer(0, cursor_buf.slice(..));
+                    render_pass.draw(0..cursor_vertices.len() as u32, 0..1);
+                }
+            }
         }
 
         Ok(())

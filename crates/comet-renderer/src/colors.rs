@@ -177,6 +177,57 @@ impl ColorPalette {
             _ => Self::default(),
         }
     }
+
+    /// Create a ColorPalette from individual hex color strings.
+    /// Falls back to defaults if parsing fails.
+    pub fn from_hex(background: &str, foreground: &str, cursor: &str, selection: &str) -> Self {
+        let default_bg = parse_hex_color(background).unwrap_or(Rgba::rgb(0x1E, 0x1E, 0x1E));
+        let default_fg = parse_hex_color(foreground).unwrap_or(Rgba::rgb(0xE5, 0xE5, 0xE5));
+        let cursor_color = parse_hex_color(cursor).unwrap_or(Rgba::rgb(0xFF, 0xFF, 0xFF));
+        let selection_bg = parse_hex_color(selection).unwrap_or(Rgba::rgb(0x4A, 0x4A, 0x4A));
+        
+        ColorPalette {
+            ansi: ANSI_COLORS,
+            default_fg,
+            default_bg,
+            cursor: cursor_color,
+            selection_bg,
+            selection_fg: default_fg,
+        }
+    }
+}
+
+/// Parse a hex color string (e.g., "#rrggbb") into Rgba.
+pub fn parse_hex_color(hex: &str) -> Option<Rgba> {
+    if !hex.starts_with('#') || hex.len() != 7 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[1..3], 16).ok()?;
+    let g = u8::from_str_radix(&hex[3..5], 16).ok()?;
+    let b = u8::from_str_radix(&hex[5..7], 16).ok()?;
+    Some(Rgba::rgb(r, g, b))
+}
+
+/// Create a ColorPalette from individual hex color strings.
+pub fn palette_from_hex(
+    background: &str,
+    foreground: &str,
+    cursor: &str,
+    selection: &str,
+) -> ColorPalette {
+    let default_bg = parse_hex_color(background).unwrap_or(Rgba::rgb(0x1E, 0x1E, 0x1E));
+    let default_fg = parse_hex_color(foreground).unwrap_or(Rgba::rgb(0xE5, 0xE5, 0xE5));
+    let cursor_color = parse_hex_color(cursor).unwrap_or(Rgba::rgb(0xFF, 0xFF, 0xFF));
+    let selection_bg = parse_hex_color(selection).unwrap_or(Rgba::rgb(0x4A, 0x4A, 0x4A));
+    
+    ColorPalette {
+        ansi: ANSI_COLORS,
+        default_fg,
+        default_bg,
+        cursor: cursor_color,
+        selection_bg,
+        selection_fg: default_fg,
+    }
 }
 
 #[cfg(test)]

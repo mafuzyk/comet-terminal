@@ -17,4 +17,4 @@ pub use error::RendererError;
 pub use font::{FontSize, FontStyle, FontSystem};
 pub use glyph_cache::GlyphCache;
 pub use metrics::MetricsManager;
-pub use renderer::{RenderContext, Renderer, RendererConfig, Viewport};
+pub use renderer::{RenderContext, Renderer, RendererConfig, CustomColors, Viewport};

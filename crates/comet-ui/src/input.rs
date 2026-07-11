@@ -61,10 +61,11 @@ pub fn key_event_to_ansi(event: &KeyEvent, ctrl: bool, alt: bool) -> Option<Vec<
     }
 
     // Special keys
-    match event.physical_key {
+    let mut result = match event.physical_key {
         PhysicalKey::Code(KeyCode::Enter) => Some(vec![b'\r']),
         PhysicalKey::Code(KeyCode::Backspace) => Some(vec![0x7f]),
         PhysicalKey::Code(KeyCode::Tab) => Some(vec![b'\t']),
+        PhysicalKey::Code(KeyCode::Escape) => Some(vec![0x1b]),
 
         PhysicalKey::Code(KeyCode::ArrowUp) => Some(b"\x1b[A".to_vec()),
         PhysicalKey::Code(KeyCode::ArrowDown) => Some(b"\x1b[B".to_vec()),
@@ -92,7 +93,15 @@ pub fn key_event_to_ansi(event: &KeyEvent, ctrl: bool, alt: bool) -> Option<Vec<
         PhysicalKey::Code(KeyCode::F12) => Some(b"\x1b[24~".to_vec()),
 
         _ => None,
+    };
+    // When Alt is held, prefix the sequence with ESC (0x1b).
+    // This applies to all special keys: arrows, function keys, etc.
+    if alt {
+        if let Some(ref mut seq) = result {
+            seq.insert(0, 0x1b);
+        }
     }
+    result
 }
 
 /// Updates the tracked modifier state from a key event.

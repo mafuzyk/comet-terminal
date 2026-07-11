@@ -8,4 +8,5 @@ comet-core = { path = "../comet-core" }
 comet-pty = { path = "../comet-pty" }
 comet-renderer = { path = "../comet-renderer" }
 comet-ui = { path = "../comet-ui" }
+comet-config = { path = "../comet-config" }
 winit = "0.30"

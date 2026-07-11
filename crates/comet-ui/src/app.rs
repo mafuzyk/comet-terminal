@@ -3,17 +3,18 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::thread;
 
+use comet_config::Config;
 use comet_core::Terminal;
 use comet_pty::{AnsiParser, PtyConfig, PtyProcess};
 use comet_renderer::{BackendType, HasWindowHandle, Renderer, RendererConfig};
 use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle};
 use winit::{
-    event::WindowEvent,
+    event::{Modifiers, WindowEvent},
     raw_window_handle::HasWindowHandle as RawHasWindowHandle,
     window::Window,
 };
 
-use crate::input::{key_event_to_ansi, update_modifiers};
+use crate::input::key_event_to_ansi;
 
 /// Wraps an `Arc<Window>` so the renderer can create a GPU surface from it.
 struct WindowOwner(Arc<Window>);
@@ -44,23 +45,23 @@ pub struct TerminalApp {
     renderer: Renderer,
     window: Arc<Window>,
     pty_rx: Receiver<Vec<u8>>,
+    thread_handle: Option<thread::JoinHandle<()>>,
     needs_redraw: bool,
-    ctrl_pressed: bool,
-    alt_pressed: bool,
+    modifiers: Modifiers,
 }
 
 impl TerminalApp {
     /// Creates a new terminal application.
-    pub fn new(window: Arc<Window>, font_size: u16) -> Self {
+    pub fn new(window: Arc<Window>, config: Config) -> Self {
         let window_size = window.inner_size();
 
         // Spawn PTY
-        let config = PtyConfig {
+        let pty_config = PtyConfig {
             cols: 80,
             rows: 24,
             ..PtyConfig::default()
         };
-        let pty = PtyProcess::spawn(config).expect("Failed to spawn PTY");
+        let pty = PtyProcess::spawn(pty_config).expect("Failed to spawn PTY");
 
         // Clone a reader for the background thread
         let bg_reader = pty
@@ -74,7 +75,9 @@ impl TerminalApp {
 
         // Background thread: reads PTY output, sends raw bytes through channel
         let (pty_tx, pty_rx) = mpsc::channel();
-        thread::spawn(move || {
+        // Clone window Arc for background thread to wake up the event loop
+        let wakeup_window = window.clone();
+        let handle = thread::spawn(move || {
             let mut reader = bg_reader;
             let mut buf = vec![0u8; 8192];
             loop {
@@ -85,6 +88,9 @@ impl TerminalApp {
                         if pty_tx.send(data).is_err() {
                             break;
                         }
+                        // Wake up the event loop so PTY output is consumed and
+                        // rendered without blocking on window events.
+                        wakeup_window.request_redraw();
                     }
                     Err(e) => {
                         eprintln!("PTY read error: {}", e);
@@ -94,20 +100,32 @@ impl TerminalApp {
             }
         });
 
-        // Create renderer
-        let config = RendererConfig {
+        // Create renderer from config
+        let renderer_config = RendererConfig {
             backend: BackendType::Wgpu,
-            font_family: "Monospace".to_string(),
-            font_size,
+            font_family: config.font.family.clone(),
+            font_size: config.font.size,
             theme: "dark".to_string(),
             dpi_scale: 1.0,
             padding_x: 2.0,
             padding_y: 2.0,
-            cursor_blink: true,
-            cursor_shape: comet_renderer::cursor::CursorShape::Block,
+            cursor_blink: config.cursor.blink,
+            cursor_shape: match config.cursor.style.as_str() {
+                "beam" => comet_renderer::cursor::CursorShape::Beam,
+                "underline" => comet_renderer::cursor::CursorShape::Underline,
+                "hollow_block" => comet_renderer::cursor::CursorShape::HollowBlock,
+                "bar" => comet_renderer::cursor::CursorShape::Bar,
+                _ => comet_renderer::cursor::CursorShape::Block,
+            },
+            colors: Some(comet_renderer::CustomColors {
+                background: config.colors.background.clone(),
+                foreground: config.colors.foreground.clone(),
+                cursor: config.colors.cursor.clone(),
+                selection: config.colors.selection.clone(),
+            }),
         };
         let mut renderer =
-            Renderer::new(config).expect("Failed to create renderer");
+            Renderer::new(renderer_config).expect("Failed to create renderer");
         renderer
             .initialize(
                 window_size.width,
@@ -122,9 +140,9 @@ impl TerminalApp {
             renderer,
             window,
             pty_rx,
+            thread_handle: Some(handle),
             needs_redraw: true,
-            ctrl_pressed: false,
-            alt_pressed: false,
+            modifiers: Modifiers::default(),
         }
     }
 
@@ -134,12 +152,21 @@ impl TerminalApp {
             WindowEvent::Resized(size) => {
                 self.resize(size.width, size.height);
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = *modifiers;
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                update_modifiers(event, &mut self.ctrl_pressed, &mut self.alt_pressed);
                 self.handle_key(event);
             }
             WindowEvent::RedrawRequested => {
+                // Always consume pending PTY data before rendering so the
+                // frame reflects the latest terminal state.
+                self.process_pty_output();
                 self.render();
+                // Clear flag — any new data that arrived between
+                // process_pty_output and render will be picked up by
+                // about_to_wait and trigger another redraw.
+                self.needs_redraw = false;
             }
             _ => {}
         }
@@ -207,7 +234,8 @@ impl TerminalApp {
 
     /// Handles a keyboard event.
     fn handle_key(&mut self, event: &winit::event::KeyEvent) {
-        if let Some(bytes) = key_event_to_ansi(event, self.ctrl_pressed, self.alt_pressed) {
+        let mods = self.modifiers.state();
+        if let Some(bytes) = key_event_to_ansi(event, mods.control_key(), mods.alt_key()) {
             if let Err(e) = self.pty.writer().write_all(&bytes) {
                 eprintln!("PTY write error: {}", e);
             }
@@ -222,5 +250,20 @@ impl TerminalApp {
     /// Returns a mutable reference to the PTY for external access (e.g., waiting).
     pub fn pty_mut(&mut self) -> &mut PtyProcess {
         &mut self.pty
+    }
+}
+
+impl Drop for TerminalApp {
+    fn drop(&mut self) {
+        // Kill the child process first. This closes the slave side of the
+        // PTY, causing the background reader thread to get EOF.
+        let _ = self.pty.kill();
+        // Join the background thread so the cloned reader is dropped before
+        // the PtyProcess (which owns the original PtyMaster).
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+        // Reap the child process to prevent zombies.
+        let _ = self.pty.wait();
     }
 }
