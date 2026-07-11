@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/comet-core",
+    "crates/comet-pty",
     "crates/comet-renderer",
     "crates/comet-ui",
     "crates/comet"

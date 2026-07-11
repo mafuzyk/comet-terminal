@@ -72,6 +72,26 @@ impl Terminal {
         &mut self.cursor
     }
 
+    /// Acesso mutável à grade (para parser ANSI escrever células diretamente).
+    pub fn grid_mut(&mut self) -> &mut Grid {
+        &mut self.grid
+    }
+
+    /// Cor de primeiro plano atual da caneta.
+    pub fn pen_foreground(&self) -> Color {
+        self.pen_foreground
+    }
+
+    /// Cor de fundo atual da caneta.
+    pub fn pen_background(&self) -> Color {
+        self.pen_background
+    }
+
+    /// Atributos atuais da caneta.
+    pub fn pen_attributes(&self) -> Attributes {
+        self.pen_attributes
+    }
+
     /// Define a cor de primeiro plano usada pelos próximos caracteres
     /// escritos via [`write`](Terminal::write).
     pub fn set_foreground(&mut self, color: Color) {
