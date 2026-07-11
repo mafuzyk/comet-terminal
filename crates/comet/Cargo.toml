@@ -5,5 +5,7 @@ edition = "2024"
 
 [dependencies]
 comet-core = { path = "../comet-core" }
+comet-pty = { path = "../comet-pty" }
 comet-renderer = { path = "../comet-renderer" }
 comet-ui = { path = "../comet-ui" }
+winit = "0.30"

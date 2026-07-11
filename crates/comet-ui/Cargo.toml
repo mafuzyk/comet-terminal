@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+comet-core = { path = "../comet-core" }
+comet-pty = { path = "../comet-pty" }
+comet-renderer = { path = "../comet-renderer" }
+winit = "0.30"
+wgpu = "23"
+raw-window-handle = "0.6"
+portable-pty = "0.9"
