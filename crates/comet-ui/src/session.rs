@@ -1,5 +1,3 @@
-//! Terminal session abstraction — owns PTY, terminal state, and renderer.
-
 use std::io::Read;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -7,13 +5,14 @@ use std::thread;
 use comet_config::Config;
 use comet_core::Terminal;
 use comet_pty::{AnsiParser, PtyConfig, PtyProcess};
-use comet_renderer::{BackendType, HasWindowHandle, Renderer, RendererConfig};
 
-/// A single terminal session: PTY + terminal state + renderer.
+/// A single terminal session: PTY + terminal state + reader thread.
+///
+/// Does NOT own a renderer — rendering is coordinated by TerminalApp
+/// through the shared MultiRenderer.
 pub struct TerminalSession {
     terminal: Terminal,
     pty: PtyProcess,
-    renderer: Renderer,
     pty_rx: Receiver<Vec<u8>>,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
@@ -58,27 +57,11 @@ impl TerminalSession {
             }
         });
 
-        let renderer_config = SessionRendererConfig::from_config(config);
-        let renderer = Renderer::new(renderer_config).expect("Failed to create renderer");
-
         Self {
             terminal,
             pty,
-            renderer,
             pty_rx,
             thread_handle: Some(handle),
-        }
-    }
-
-    /// Initializes the renderer with a window handle.
-    pub fn init_renderer(
-        &mut self,
-        width: u32,
-        height: u32,
-        window_handle: Option<Box<dyn HasWindowHandle>>,
-    ) {
-        if let Err(e) = self.renderer.initialize(width, height, window_handle) {
-            eprintln!("Failed to initialize renderer: {}", e);
         }
     }
 
@@ -100,11 +83,11 @@ impl TerminalSession {
         }
     }
 
-    /// Resizes the PTY, terminal, and renderer.
-    pub fn resize(&mut self, width: u32, height: u32) {
-        let cell_size = self.renderer.metrics().cell_size();
-        let cols = (width / cell_size.width.max(1)).max(1);
-        let rows = (height / cell_size.height.max(1)).max(1);
+    /// Resizes the PTY and terminal grid. Does NOT resize a renderer
+    /// (that's handled by TerminalApp for the shared renderer).
+    pub fn resize(&mut self, width: u32, height: u32, cell_size: (u32, u32)) {
+        let cols = (width / cell_size.0.max(1)).max(1);
+        let rows = (height / cell_size.1.max(1)).max(1);
 
         let pty_size = portable_pty::PtySize {
             rows: rows as u16,
@@ -117,10 +100,6 @@ impl TerminalSession {
         }
 
         self.terminal.resize(cols as usize, rows as usize);
-
-        if let Err(e) = self.renderer.resize(width, height) {
-            eprintln!("Renderer resize error: {}", e);
-        }
     }
 
     /// Returns true if the background reader thread is still alive.
@@ -136,26 +115,8 @@ impl TerminalSession {
         &mut self.terminal
     }
 
-    pub fn renderer(&self) -> &Renderer {
-        &self.renderer
-    }
-
-    pub fn renderer_mut(&mut self) -> &mut Renderer {
-        &mut self.renderer
-    }
-
     pub fn pty_mut(&mut self) -> &mut PtyProcess {
         &mut self.pty
-    }
-
-    /// Replaces the renderer (used during config hot-reload).
-    pub fn set_renderer(&mut self, renderer: Renderer) {
-        self.renderer = renderer;
-    }
-
-    /// Renders the terminal state through this session's renderer.
-    pub fn render(&mut self) -> comet_renderer::error::RendererResult<()> {
-        self.renderer.render(&self.terminal)
     }
 }
 
@@ -166,37 +127,5 @@ impl Drop for TerminalSession {
             let _ = handle.join();
         }
         let _ = self.pty.wait();
-    }
-}
-
-// ---- Internal helper ----
-
-struct SessionRendererConfig;
-
-impl SessionRendererConfig {
-    fn from_config(config: &Config) -> RendererConfig {
-        RendererConfig {
-            backend: BackendType::Wgpu,
-            font_family: config.font.family.clone(),
-            font_size: config.font.size,
-            theme: "dark".to_string(),
-            dpi_scale: 1.0,
-            padding_x: 2.0,
-            padding_y: 2.0,
-            cursor_blink: config.cursor.blink,
-            cursor_shape: match config.cursor.style.as_str() {
-                "beam" => comet_renderer::cursor::CursorShape::Beam,
-                "underline" => comet_renderer::cursor::CursorShape::Underline,
-                "hollow_block" => comet_renderer::cursor::CursorShape::HollowBlock,
-                "bar" => comet_renderer::cursor::CursorShape::Bar,
-                _ => comet_renderer::cursor::CursorShape::Block,
-            },
-            colors: Some(comet_renderer::CustomColors {
-                background: config.colors.background.clone(),
-                foreground: config.colors.foreground.clone(),
-                cursor: config.colors.cursor.clone(),
-                selection: config.colors.selection.clone(),
-            }),
-        }
     }
 }

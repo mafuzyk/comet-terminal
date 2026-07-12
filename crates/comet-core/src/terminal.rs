@@ -533,6 +533,61 @@ impl Terminal {
     pub fn expand_selection_to_line(&mut self) {
         self.selection.expand_to_line();
     }
+
+    // ========== Search & Navigation helpers ==========
+
+    /// Returns the scrollback length (total lines in scrollback).
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Scrolls the viewport so that the given absolute row is visible.
+    /// If the row is in the grid (recent), scrolls to bottom.
+    /// If the row is in scrollback, scrolls to show it.
+    pub fn scroll_to_absolute_row(&mut self, abs_row: usize) {
+        let sb_len = self.scrollback.len();
+        if abs_row < sb_len {
+            // Row is in scrollback — compute offset so row is at bottom of viewport
+            let offset = sb_len - abs_row;
+            self.scrollback.scroll_to_bottom();
+            self.scrollback.scroll_up(offset);
+            self.viewport_offset = self.scrollback.viewport_offset();
+        } else {
+            self.scroll_viewport_to_bottom();
+        }
+    }
+
+    /// Returns a cell at the given absolute position
+    pub fn cell_at(&self, col: usize, abs_row: usize) -> Option<&Cell> {
+        self.get_cell_absolute(col, abs_row)
+    }
+
+    /// Returns the hyperlink URI at the given absolute position, if any.
+    pub fn hyperlink_at(&self, col: usize, abs_row: usize) -> Option<&str> {
+        self.hyperlinks.get(&(abs_row, col)).map(|s| s.as_str())
+    }
+
+    /// Returns the plain text of a row at the given absolute index.
+    pub fn get_row_text(&self, abs_row: usize) -> String {
+        let mut text = String::new();
+        if abs_row < self.scrollback.len() {
+            if let Some(row) = self.scrollback.get_line(abs_row) {
+                for cell in &row.cells {
+                    text.push(cell.character);
+                }
+            }
+        } else {
+            let grid_row = abs_row - self.scrollback.len();
+            if grid_row < self.height {
+                if let Some(cells) = self.grid.row(grid_row) {
+                    for cell in cells {
+                        text.push(cell.character);
+                    }
+                }
+            }
+        }
+        text
+    }
 }
 
 #[cfg(test)]

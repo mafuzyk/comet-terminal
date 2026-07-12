@@ -321,19 +321,138 @@ impl Default for AppearanceConfig {
 /// Keyboard shortcut configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortcutsConfig {
-    /// Keybinding for search (e.g., "CTRL_SHIFT_F").
+    /// Keybinding for copy (e.g., "Ctrl+Shift+C").
+    #[serde(default = "default_copy_shortcut")]
+    pub copy: String,
+    /// Keybinding for paste (e.g., "Ctrl+Shift+V").
+    #[serde(default = "default_paste_shortcut")]
+    pub paste: String,
+    /// Keybinding for search (e.g., "Ctrl+Shift+F").
     #[serde(default = "default_search_shortcut")]
     pub search: String,
+    /// Keybinding for new tab (e.g., "Ctrl+Shift+T").
+    #[serde(default = "default_new_tab_shortcut")]
+    pub new_tab: String,
+    /// Keybinding for close tab (e.g., "Ctrl+Shift+W").
+    #[serde(default = "default_close_tab_shortcut")]
+    pub close_tab: String,
+    /// Keybinding for next tab (e.g., "Ctrl+Tab").
+    #[serde(default = "default_next_tab_shortcut")]
+    pub next_tab: String,
+    /// Keybinding for previous tab (e.g., "Ctrl+Shift+Tab").
+    #[serde(default = "default_prev_tab_shortcut")]
+    pub previous_tab: String,
+    /// Keybinding for split horizontal (e.g., "Alt+Shift+H").
+    #[serde(default = "default_split_horizontal")]
+    pub split_horizontal: String,
+    /// Keybinding for split vertical (e.g., "Alt+Shift+V").
+    #[serde(default = "default_split_vertical")]
+    pub split_vertical: String,
+    /// Keybinding for close pane (e.g., "Ctrl+Shift+Q").
+    #[serde(default = "default_close_pane")]
+    pub close_pane: String,
+    /// Keybinding for scroll page up (e.g., "Shift+PageUp").
+    #[serde(default = "default_scroll_page_up")]
+    pub scroll_page_up: String,
+    /// Keybinding for scroll page down (e.g., "Shift+PageDown").
+    #[serde(default = "default_scroll_page_down")]
+    pub scroll_page_down: String,
+    /// Keybinding for scroll to top (e.g., "Shift+Home").
+    #[serde(default = "default_scroll_to_top")]
+    pub scroll_to_top: String,
+    /// Keybinding for scroll to bottom (e.g., "Shift+End").
+    #[serde(default = "default_scroll_to_bottom")]
+    pub scroll_to_bottom: String,
+    /// Keybinding for focus pane up (e.g., "Ctrl+Alt+ArrowUp").
+    #[serde(default = "default_focus_up")]
+    pub focus_up: String,
+    /// Keybinding for focus pane down (e.g., "Ctrl+Alt+ArrowDown").
+    #[serde(default = "default_focus_down")]
+    pub focus_down: String,
+    /// Keybinding for focus pane left (e.g., "Ctrl+Alt+ArrowLeft").
+    #[serde(default = "default_focus_left")]
+    pub focus_left: String,
+    /// Keybinding for focus pane right (e.g., "Ctrl+Alt+ArrowRight").
+    #[serde(default = "default_focus_right")]
+    pub focus_right: String,
 }
 
+fn default_copy_shortcut() -> String {
+    "Ctrl+Shift+C".to_string()
+}
+fn default_paste_shortcut() -> String {
+    "Ctrl+Shift+V".to_string()
+}
 fn default_search_shortcut() -> String {
-    "CTRL_SHIFT_F".to_string()
+    "Ctrl+Shift+F".to_string()
+}
+fn default_new_tab_shortcut() -> String {
+    "Ctrl+Shift+T".to_string()
+}
+fn default_close_tab_shortcut() -> String {
+    "Ctrl+Shift+W".to_string()
+}
+fn default_next_tab_shortcut() -> String {
+    "Ctrl+Tab".to_string()
+}
+fn default_prev_tab_shortcut() -> String {
+    "Ctrl+Shift+Tab".to_string()
+}
+fn default_split_horizontal() -> String {
+    "Alt+Shift+H".to_string()
+}
+fn default_split_vertical() -> String {
+    "Alt+Shift+V".to_string()
+}
+fn default_close_pane() -> String {
+    "Ctrl+Shift+Q".to_string()
+}
+fn default_scroll_page_up() -> String {
+    "PageUp".to_string()
+}
+fn default_scroll_page_down() -> String {
+    "PageDown".to_string()
+}
+fn default_scroll_to_top() -> String {
+    "Home".to_string()
+}
+fn default_scroll_to_bottom() -> String {
+    "End".to_string()
+}
+fn default_focus_up() -> String {
+    "Ctrl+Alt+Up".to_string()
+}
+fn default_focus_down() -> String {
+    "Ctrl+Alt+Down".to_string()
+}
+fn default_focus_left() -> String {
+    "Ctrl+Alt+Left".to_string()
+}
+fn default_focus_right() -> String {
+    "Ctrl+Alt+Right".to_string()
 }
 
 impl Default for ShortcutsConfig {
     fn default() -> Self {
         Self {
+            copy: default_copy_shortcut(),
+            paste: default_paste_shortcut(),
             search: default_search_shortcut(),
+            new_tab: default_new_tab_shortcut(),
+            close_tab: default_close_tab_shortcut(),
+            next_tab: default_next_tab_shortcut(),
+            previous_tab: default_prev_tab_shortcut(),
+            split_horizontal: default_split_horizontal(),
+            split_vertical: default_split_vertical(),
+            close_pane: default_close_pane(),
+            scroll_page_up: default_scroll_page_up(),
+            scroll_page_down: default_scroll_page_down(),
+            scroll_to_top: default_scroll_to_top(),
+            scroll_to_bottom: default_scroll_to_bottom(),
+            focus_up: default_focus_up(),
+            focus_down: default_focus_down(),
+            focus_left: default_focus_left(),
+            focus_right: default_focus_right(),
         }
     }
 }

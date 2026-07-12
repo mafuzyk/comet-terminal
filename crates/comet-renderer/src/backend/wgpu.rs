@@ -8,6 +8,7 @@ use crate::backend::{
 use crate::colors::ColorPalette;
 use crate::error::{RendererError, RendererResult};
 use crate::glyph_cache::GlyphCache;
+use crate::renderer::Viewport;
 use comet_core::{Row, Terminal};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -262,6 +263,8 @@ pub struct WgpuBackend {
     frame: Mutex<Option<FrameResources>>,
     /// Set when a non-fatal SurfaceError occurs; subsequent frame methods skip.
     frame_skipped: bool,
+    /// Tracks if this is the first pane rendered this frame (for clearing).
+    first_pane_this_frame: bool,
 
     // Reusable vertex buffers to avoid per-frame Vec allocations
     sel_vertices_buf: Vec<GlyphVertex>,
@@ -300,6 +303,7 @@ impl WgpuBackend {
             // Per-frame resources
             frame: Mutex::new(None),
             frame_skipped: false,
+            first_pane_this_frame: true,
             // Reusable vertex buffers
             sel_vertices_buf: Vec::new(),
             glyph_vertices_buf: Vec::new(),
@@ -655,6 +659,7 @@ impl RenderBackend for WgpuBackend {
                     });
                 *self.frame.lock() = Some(FrameResources { output, encoder });
                 self.frame_skipped = false;
+                self.first_pane_this_frame = true;
                 Ok(())
             }
             Err(wgpu::SurfaceError::Timeout) => {
@@ -728,6 +733,8 @@ impl RenderBackend for WgpuBackend {
             glyph_cache,
             atlas,
             colors,
+            context.viewport.x,
+            context.viewport.y,
             &mut self.sel_vertices_buf,
             &mut self.glyph_vertices_buf,
         )?;
@@ -826,6 +833,17 @@ impl RenderBackend for WgpuBackend {
         let bind_group = self.cached_bind_group.as_ref().unwrap();
 
         let bg = colors.default_bg.to_f32_array();
+        let load_op = if self.first_pane_this_frame {
+            self.first_pane_this_frame = false;
+            wgpu::LoadOp::Clear(wgpu::Color {
+                r: bg[0] as f64,
+                g: bg[1] as f64,
+                b: bg[2] as f64,
+                a: 1.0,
+            })
+        } else {
+            wgpu::LoadOp::Load
+        };
 
         {
             let mut render_pass =
@@ -837,12 +855,7 @@ impl RenderBackend for WgpuBackend {
                             view: &view,
                             resolve_target: None,
                             ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: bg[0] as f64,
-                                    g: bg[1] as f64,
-                                    b: bg[2] as f64,
-                                    a: 1.0,
-                                }),
+                                load: load_op,
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
@@ -850,6 +863,10 @@ impl RenderBackend for WgpuBackend {
                         occlusion_query_set: None,
                         timestamp_writes: None,
                     });
+
+            // The viewport defines the clipping region for this pane
+            let vp = context.viewport;
+            render_pass.set_scissor_rect(vp.x, vp.y, vp.width, vp.height);
 
             // ── Render selection background ──────────────────────────────
             if !self.sel_vertices_buf.is_empty() {
@@ -956,6 +973,136 @@ impl RenderBackend for WgpuBackend {
 
         // Write draw calls back to diagnostics
         context.diagnostics.draw_calls = draw_calls;
+
+        Ok(())
+    }
+
+    fn render_overlay(
+        &mut self,
+        solid_vertices: &[GlyphVertex],
+        glyph_vertices: &[GlyphVertex],
+        viewport: Viewport,
+    ) -> RendererResult<()> {
+        if self.frame_skipped || (solid_vertices.is_empty() && glyph_vertices.is_empty()) {
+            return Ok(());
+        }
+
+        // Use self.ctx.as_ref() directly (not self.ctx()) so the borrow
+        // checker can see only self.ctx is borrowed, not all of self.
+        let ctx = self
+            .ctx
+            .as_ref()
+            .ok_or(RendererError::backend("Backend not initialized"))?;
+        let render_pipeline = self
+            .render_pipeline
+            .as_ref()
+            .ok_or(RendererError::backend("Pipeline not created"))?;
+        let cursor_pipeline = self
+            .cursor_pipeline
+            .as_ref()
+            .ok_or(RendererError::backend("Cursor pipeline not created"))?;
+        let uniform_buffer = self
+            .uniform_buffer
+            .as_ref()
+            .ok_or(RendererError::backend("Uniform buffer not created"))?;
+
+        let uniforms = WgpuUniforms {
+            screen_size: [ctx.config.width as f32, ctx.config.height as f32],
+            _padding: [0.0; 2],
+        };
+        ctx.queue
+            .write_buffer(uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+
+        let mut frame = self.frame.lock();
+        let resources = frame
+            .as_mut()
+            .ok_or(RendererError::backend("No frame in progress"))?;
+
+        let view = resources
+            .output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        {
+            let mut render_pass =
+                resources
+                    .encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Overlay Render Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    });
+
+            render_pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+
+            // Draw solid vertices using cursor pipeline (solid color, no texture)
+            if !solid_vertices.is_empty() {
+                let solid_size = (solid_vertices.len() * std::mem::size_of::<GlyphVertex>()) as u64;
+                Self::ensure_buffer(
+                    &ctx.device,
+                    &mut self.persistent_sel_buffer,
+                    "Overlay Solid Vertices",
+                    solid_size,
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                );
+                ctx.queue.write_buffer(
+                    self.persistent_sel_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(solid_vertices),
+                );
+
+                let cursor_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Overlay Solid Bind Group"),
+                    layout: self.cursor_bind_group_layout.as_ref().unwrap(),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform_buffer.as_entire_binding(),
+                    }],
+                });
+
+                render_pass.set_pipeline(cursor_pipeline);
+                render_pass.set_bind_group(0, &cursor_bg, &[]);
+                render_pass
+                    .set_vertex_buffer(0, self.persistent_sel_buffer.as_ref().unwrap().slice(..));
+                render_pass.draw(0..solid_vertices.len() as u32, 0..1);
+            }
+
+            // Draw glyph vertices using glyph pipeline (atlas texture)
+            if !glyph_vertices.is_empty() {
+                let glyph_size = (glyph_vertices.len() * std::mem::size_of::<GlyphVertex>()) as u64;
+                Self::ensure_buffer(
+                    &ctx.device,
+                    &mut self.persistent_glyph_buffer,
+                    "Overlay Glyph Vertices",
+                    glyph_size,
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                );
+                ctx.queue.write_buffer(
+                    self.persistent_glyph_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(glyph_vertices),
+                );
+
+                if let Some(bind_group) = self.cached_bind_group.as_ref() {
+                    render_pass.set_pipeline(render_pipeline);
+                    render_pass.set_bind_group(0, bind_group, &[]);
+                    render_pass.set_vertex_buffer(
+                        0,
+                        self.persistent_glyph_buffer.as_ref().unwrap().slice(..),
+                    );
+                    render_pass.draw(0..glyph_vertices.len() as u32, 0..1);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -1164,10 +1311,14 @@ fn build_vertex_data(
     glyph_cache: &GlyphCache,
     atlas: &GlyphAtlas,
     colors: &ColorPalette,
+    offset_x: u32,
+    offset_y: u32,
     sel_vertices: &mut Vec<GlyphVertex>,
     glyph_vertices: &mut Vec<GlyphVertex>,
 ) -> RendererResult<()> {
     let resolve_color = |color: comet_core::Color| -> [f32; 4] { resolve_color(color, colors) };
+    let ox = offset_x as f32;
+    let oy = offset_y as f32;
 
     for (vis_row, row) in rows.iter().enumerate() {
         let abs_row = terminal.visible_row_to_absolute(vis_row);
@@ -1178,8 +1329,8 @@ fn build_vertex_data(
                 None => continue,
             };
 
-            let px = col as f32 * cell_w;
-            let py = vis_row as f32 * cell_h;
+            let px = ox + col as f32 * cell_w;
+            let py = oy + vis_row as f32 * cell_h;
 
             // Selection background
             if has_selection && terminal.selection().contains(col, abs_row) {

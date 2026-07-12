@@ -1,8 +1,8 @@
 //! Main renderer module.
 
+use crate::atlas::GlyphVertex;
 use crate::backend::{BackendFactory, BackendType, HasWindowHandle, RenderBackend};
 use crate::colors::ColorPalette;
-use crate::cursor::CursorRenderer;
 use crate::damage::{DamageRect, DamageTracker};
 use crate::diagnostics::Diagnostics;
 use crate::error::{RendererError, RendererResult};
@@ -90,12 +90,65 @@ pub struct RenderContext<'a> {
     pub terminal: &'a Terminal,
     pub rows: &'a [Row],
     pub damage: &'a DamageTracker,
-    pub cursor_renderer: &'a CursorRenderer,
+    pub cursor_renderer: &'a crate::cursor::CursorRenderer,
     pub glyph_cache: &'a GlyphCache,
     pub metrics: &'a MetricsManager,
     pub colors: &'a ColorPalette,
     pub diagnostics: &'a mut Diagnostics,
     pub viewport: Viewport,
+}
+
+/// Per-pane state for multi-pane rendering.
+pub struct PaneRenderState {
+    /// Previous frame rows for damage computation.
+    pub prev_rows: Option<Vec<Row>>,
+    /// Previous cursor position.
+    pub prev_cursor: (u32, u32),
+    /// Previous viewport offset.
+    pub prev_viewport: usize,
+    /// Previous selection bounds.
+    pub prev_selection: Option<(usize, usize, usize, usize)>,
+    /// Reusable buffer for visible rows.
+    pub rows_buf: Vec<Row>,
+    /// Per-pane cursor renderer (each pane has its own cursor).
+    pub cursor_renderer: crate::cursor::CursorRenderer,
+}
+
+impl PaneRenderState {
+    pub fn new(
+        cell_w: f32,
+        cell_h: f32,
+        shape: crate::cursor::CursorShape,
+        blink: bool,
+        color: [f32; 4],
+    ) -> Self {
+        let mut cursor = crate::cursor::CursorRenderer::new(
+            Arc::new(DamageTracker::new(80, 24)),
+            cell_w,
+            cell_h,
+        );
+        cursor.set_shape(shape);
+        cursor.set_blink(blink);
+        cursor.set_color(color);
+        Self {
+            prev_rows: None,
+            prev_cursor: (0, 0),
+            prev_viewport: 0,
+            prev_selection: None,
+            rows_buf: Vec::new(),
+            cursor_renderer: cursor,
+        }
+    }
+
+    /// Update cursor cell size (called on resize).
+    pub fn set_cell_size(&mut self, cell_w: f32, cell_h: f32) {
+        self.cursor_renderer.set_cell_size(cell_w, cell_h);
+    }
+
+    /// Notify that there was keyboard activity (resets blink).
+    pub fn cursor_activity(&mut self) {
+        self.cursor_renderer.activity();
+    }
 }
 
 /// Main renderer struct.
@@ -104,20 +157,15 @@ pub struct Renderer {
     backend: Box<dyn RenderBackend>,
     font_system: Arc<FontSystem>,
     glyph_cache: Option<Arc<GlyphCache>>,
-    cursor_renderer: Arc<CursorRenderer>,
     damage_tracker: Arc<DamageTracker>,
     metrics: Arc<MetricsManager>,
     colors: Arc<ColorPalette>,
     frame_count: u64,
-    // Previous frame state for incremental damage
-    prev_rows: Option<Vec<Row>>,
-    prev_cursor: (u32, u32),
-    prev_viewport: usize,
-    prev_selection: Option<(usize, usize, usize, usize)>,
-    // Reusable buffer to avoid Vec allocation per frame
-    rows_buf: Vec<Row>,
-    // Frame diagnostics
     diagnostics: Diagnostics,
+    /// Default cursor settings shared by all panes.
+    cursor_shape: crate::cursor::CursorShape,
+    cursor_blink: bool,
+    cursor_color: [f32; 4],
 }
 
 impl Renderer {
@@ -143,40 +191,26 @@ impl Renderer {
             80,
         )));
 
-        // Create cursor renderer
-        let cursor_renderer = Arc::new(CursorRenderer::new(
-            Arc::new(DamageTracker::new(80, 24)),
-            cell_size.width as f32,
-            cell_size.height as f32,
-        ));
-
         // Create color palette
         let colors = Arc::new(config.resolve_colors());
 
-        // Apply cursor config from user settings
-        {
-            let cursor_color = colors.cursor.to_f32_array();
-            cursor_renderer.set_shape(config.cursor_shape);
-            cursor_renderer.set_blink(config.cursor_blink);
-            cursor_renderer.set_color(cursor_color);
-        }
+        let cursor_shape = config.cursor_shape;
+        let cursor_blink = config.cursor_blink;
+        let cursor_color = colors.cursor.to_f32_array();
 
         Ok(Self {
             config,
             backend,
             font_system,
             glyph_cache: None,
-            cursor_renderer,
             damage_tracker,
             metrics,
             colors,
             frame_count: 0,
-            prev_rows: None,
-            prev_cursor: (0, 0),
-            prev_viewport: 0,
-            prev_selection: None,
-            rows_buf: Vec::new(),
             diagnostics: Diagnostics::default(),
+            cursor_shape,
+            cursor_blink,
+            cursor_color,
         })
     }
 
@@ -220,32 +254,36 @@ impl Renderer {
             );
         });
         let cell_size = self.metrics.cell_size();
-        self.cursor_renderer
-            .set_cell_size(cell_size.width as f32, cell_size.height as f32);
-        self.prev_rows = None;
         self.damage_tracker.mark_full();
         Ok(())
     }
 
-    /// Renders a frame.
-    pub fn render(&mut self, terminal: &Terminal) -> RendererResult<()> {
+    /// Begins a new frame. Must call before any `render_pane` calls.
+    pub fn begin_frame(&mut self) -> RendererResult<()> {
         self.frame_count += 1;
-
-        // Update frame diagnostics
         self.diagnostics.tick();
+        self.backend.begin_frame()
+    }
+
+    /// Renders a single terminal pane into the given viewport.
+    pub fn render_pane(
+        &mut self,
+        terminal: &Terminal,
+        viewport: Viewport,
+        state: &mut PaneRenderState,
+    ) -> RendererResult<()> {
+        // Update cursor blink for this pane
+        state.cursor_renderer.update_blink();
 
         // Fill reusable buffer with current visible rows
-        terminal.fill_visible_rows(&mut self.rows_buf);
+        terminal.fill_visible_rows(&mut state.rows_buf);
 
         // Compute damage comparing current vs previous frame
         let dt = &*self.damage_tracker;
-        let pv = &mut self.prev_viewport;
-        let pc = &mut self.prev_cursor;
-        let ps = &mut self.prev_selection;
-        Self::compute_damage(terminal, &self.rows_buf, &self.prev_rows, dt, pv, pc, ps);
-
-        // Update cursor blink state (marks damage on toggle)
-        self.cursor_renderer.update_blink();
+        let pv = &mut state.prev_viewport;
+        let pc = &mut state.prev_cursor;
+        let ps = &mut state.prev_selection;
+        Self::compute_damage(terminal, &state.rows_buf, &state.prev_rows, dt, pv, pc, ps);
 
         let glyph_cache = self.glyph_cache.as_ref().ok_or_else(|| {
             RendererError::backend("Renderer not initialized (call initialize first)")
@@ -261,38 +299,55 @@ impl Renderer {
             d.backend = format!("{:?}", self.config.backend);
         }
 
-        // Begin frame
-        self.backend.begin_frame()?;
-
         let mut context = RenderContext {
             terminal,
-            rows: &self.rows_buf,
+            rows: &state.rows_buf,
             damage: &self.damage_tracker,
-            cursor_renderer: &self.cursor_renderer,
+            cursor_renderer: &state.cursor_renderer,
             glyph_cache,
             metrics: &self.metrics,
             colors: &self.colors,
             diagnostics: &mut self.diagnostics,
-            viewport: Viewport {
-                x: 0,
-                y: 0,
-                width: self.backend.size().0,
-                height: self.backend.size().1,
-            },
+            viewport,
         };
 
         self.backend.render(&mut context)?;
 
-        self.backend.end_frame()?;
-        self.backend.present()?;
-
-        // Swap buffers: prev_rows takes current frame, rows_buf takes old allocation
-        self.prev_rows = Some(std::mem::replace(
-            &mut self.rows_buf,
-            self.prev_rows.take().unwrap_or_default(),
+        // Swap buffers
+        state.prev_rows = Some(std::mem::replace(
+            &mut state.rows_buf,
+            state.prev_rows.take().unwrap_or_default(),
         ));
 
         Ok(())
+    }
+
+    /// Ends the current frame and presents.
+    pub fn end_frame(&mut self) -> RendererResult<()> {
+        self.backend.end_frame()?;
+        self.backend.present()
+    }
+
+    /// Renders a single terminal to the full surface (convenience wrapper).
+    pub fn render(&mut self, terminal: &Terminal) -> RendererResult<()> {
+        let size = self.backend.size();
+        let cell_size = self.metrics.cell_size();
+        let mut state = PaneRenderState::new(
+            cell_size.width as f32,
+            cell_size.height as f32,
+            self.cursor_shape,
+            self.cursor_blink,
+            self.cursor_color,
+        );
+        let viewport = Viewport {
+            x: 0,
+            y: 0,
+            width: size.0,
+            height: size.1,
+        };
+        self.begin_frame()?;
+        self.render_pane(terminal, viewport, &mut state)?;
+        self.end_frame()
     }
 
     /// Computes damage regions from terminal state by diffing against
@@ -404,9 +459,19 @@ impl Renderer {
         self.glyph_cache.as_deref()
     }
 
-    /// Gets the cursor renderer.
-    pub fn cursor_renderer(&self) -> &CursorRenderer {
-        &self.cursor_renderer
+    /// Gets the cursor shape config for creating PaneRenderState.
+    pub fn cursor_shape(&self) -> crate::cursor::CursorShape {
+        self.cursor_shape
+    }
+
+    /// Gets cursor blink config.
+    pub fn cursor_blink(&self) -> bool {
+        self.cursor_blink
+    }
+
+    /// Gets cursor color.
+    pub fn cursor_color(&self) -> [f32; 4] {
+        self.cursor_color
     }
 
     /// Gets the metrics manager.
@@ -432,6 +497,23 @@ impl Renderer {
     /// Gets a mutable reference to the backend.
     pub fn backend_mut(&mut self) -> &mut dyn RenderBackend {
         self.backend.as_mut()
+    }
+
+    /// Returns true if the renderer has been initialized with a window.
+    pub fn is_initialized(&self) -> bool {
+        self.glyph_cache.is_some()
+    }
+
+    /// Renders an overlay (solid rects + glyph text) on top of the current frame.
+    /// Must be called between `begin_frame()` and `end_frame()`.
+    pub fn render_overlay(
+        &mut self,
+        solid_vertices: &[GlyphVertex],
+        glyph_vertices: &[GlyphVertex],
+        viewport: Viewport,
+    ) -> RendererResult<()> {
+        self.backend
+            .render_overlay(solid_vertices, glyph_vertices, viewport)
     }
 
     /// Sets whether the diagnostics overlay is shown.

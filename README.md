@@ -195,8 +195,8 @@ comet-core      ████████████████████ 100
 comet-pty       ██████████████████░░  90% — PTY + parser, OSC 8/52, bell, resize
 comet-renderer  ██████████████████░░  90% — WGPU + CPU, damage tracking, LRU cache, persistent buffers
 comet-config    ████████████████████ 100% — config, themes, hot-reload, session save/restore
-comet-ui        ████████████████░░░░  80% — window, input, session management, clipboard
-comet           ██████████████████░░  85% — application binary, icon, config, session
+comet-ui        ████████████████████░  90% — window, tabs, panes, session management, clipboard
+comet           ████████████████████░  90% — application binary, icon, config, session
 ```
 
 **87 tests** across all crates.
@@ -226,19 +226,26 @@ comet           ██████████████████░░  85
 - BEL (bell) visual feedback
 - Config hot-reload at runtime
 - Session save/restore (window geometry, font, theme)
-- `TerminalSession` / `TerminalManager` abstractions (prepares for tabs/panes)
+- `TerminalSession` / `TerminalManager` abstractions for tabs and panes
+- Tab bar with visual tabs, close buttons (×), and title truncation
+- Split pane support (horizontal/vertical) with keyboard shortcuts
+- Pane focus navigation (Ctrl+Alt+Arrow) and focus indicator border
+- Split divider rendering with drag-to-resize handles
+- Overlay render pass for UI chrome (tab bar, dividers, focus indicators)
+- Search in scrollback (Ctrl+Shift+F)
+- Ctrl+Click hyperlink opening
+- Customizable keybindings (14 mappable shortcuts)
 - Application icon placeholder (ready for Mochi mascot)
 - Cross-platform config path resolution
 
 ### In progress / planned
 
-- Tabs and split panes UI
-- Search in scrollback (Ctrl+Shift+F)
-- Ctrl+Click hyperlink opening
-- Customizable keybindings
+- Search match highlighting in terminal content
 - Mochi mascot and final visual identity
 - Desktop notifications for bell
 - Multi-PTY session isolation
+- Configurable tab positioning (top/bottom)
+- Unlimited split pane nesting
 
 ---
 

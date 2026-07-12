@@ -1,6 +1,8 @@
 //! Rendering backend abstraction.
 
+use crate::atlas::GlyphVertex;
 use crate::error::RendererResult;
+use crate::renderer::Viewport;
 
 /// Backend type enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +117,21 @@ pub trait RenderBackend: Send + Sync {
 
     /// Renders the terminal context.
     fn render(&mut self, context: &mut crate::renderer::RenderContext) -> RendererResult<()>;
+
+    /// Renders an overlay (solid rects + glyph text) on top of the current frame.
+    /// Uses LoadOp::Load so existing content is preserved.
+    /// `viewport` defines the scissor rect for clipping.
+    fn render_overlay(
+        &mut self,
+        solid_vertices: &[GlyphVertex],
+        glyph_vertices: &[GlyphVertex],
+        viewport: Viewport,
+    ) -> RendererResult<()> {
+        let _ = solid_vertices;
+        let _ = glyph_vertices;
+        let _ = viewport;
+        Ok(())
+    }
 
     /// Presents the frame to the screen.
     fn present(&mut self) -> RendererResult<()>;
