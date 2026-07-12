@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Comet
+Comment=GPU-accelerated terminal emulator
+Exec=comet
+Terminal=false
+Type=Application
+Icon=comet
+Categories=System;TerminalEmulator;
+StartupNotify=true

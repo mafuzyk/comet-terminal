@@ -157,6 +157,10 @@ cargo build --release
 
 # (optional) Install to ~/.cargo/bin
 cargo install --path crates/comet
+
+# (optional) Add desktop entry for launchers (KDE, GNOME, etc.)
+cp assets/comet.desktop ~/.local/share/applications/
+update-desktop-database ~/.local/share/applications/
 ```
 
 ### Nix / Flakes
