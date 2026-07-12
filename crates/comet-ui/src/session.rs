@@ -23,6 +23,10 @@ impl TerminalSession {
         let pty_config = PtyConfig {
             cols: 80,
             rows: 24,
+            // Pass -i so bash/zsh run as interactive shells and print a
+            // prompt. Without it they are non-interactive and produce no
+            // output, leaving the terminal grid completely empty.
+            args: vec!["-i".to_string()],
             ..PtyConfig::default()
         };
         let pty = PtyProcess::spawn(pty_config).expect("Failed to spawn PTY");

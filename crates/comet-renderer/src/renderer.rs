@@ -166,6 +166,8 @@ pub struct Renderer {
     cursor_shape: crate::cursor::CursorShape,
     cursor_blink: bool,
     cursor_color: [f32; 4],
+    /// True when the last begin_frame was skipped (non-fatal surface error).
+    frame_skipped: bool,
 }
 
 impl Renderer {
@@ -211,6 +213,7 @@ impl Renderer {
             cursor_shape,
             cursor_blink,
             cursor_color,
+            frame_skipped: false,
         })
     }
 
@@ -262,7 +265,9 @@ impl Renderer {
     pub fn begin_frame(&mut self) -> RendererResult<()> {
         self.frame_count += 1;
         self.diagnostics.tick();
-        self.backend.begin_frame()
+        let result = self.backend.begin_frame();
+        self.frame_skipped = self.backend.frame_skipped();
+        result
     }
 
     /// Renders a single terminal pane into the given viewport.

@@ -17,39 +17,41 @@ struct CometApp {
 
 impl ApplicationHandler for CometApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.app.is_none() {
-            // Ensure default themes exist
-            if let Err(e) = ensure_default_themes() {
-                eprintln!("Failed to initialize default themes: {}", e);
-            }
-            let config = load_config().unwrap_or_else(|e| {
-                eprintln!("Failed to load config: {}", e);
-                comet_config::Config::default()
-            });
-            let session = load_session();
-            let window_size = winit::dpi::LogicalSize::new(
-                session.window_width as f64,
-                session.window_height as f64,
-            );
-            let window = Arc::new(
-                event_loop
-                    .create_window(
-                        WindowAttributes::default()
-                            .with_title("Comet Terminal")
-                            .with_window_icon(icon::load_app_icon())
-                            .with_inner_size(window_size),
-                    )
-                    .expect("Failed to create window"),
-            );
-
-            // Restore window position if saved
-            if let (Some(x), Some(y)) = (session.window_x, session.window_y) {
-                let _ = window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
-            }
-
-            let terminal_app = TerminalApp::new(window, config, session);
-            self.app = Some(terminal_app);
+        if self.app.is_some() {
+            return;
         }
+
+        // Ensure default themes exist
+        if let Err(e) = ensure_default_themes() {
+            eprintln!("Failed to initialize default themes: {}", e);
+        }
+        let config = load_config().unwrap_or_else(|e| {
+            eprintln!("Failed to load config: {}", e);
+            comet_config::Config::default()
+        });
+        let session = load_session();
+        let window_size = winit::dpi::LogicalSize::new(
+            session.window_width as f64,
+            session.window_height as f64,
+        );
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    WindowAttributes::default()
+                        .with_title("Comet Terminal")
+                        .with_window_icon(icon::load_app_icon())
+                        .with_inner_size(window_size),
+                )
+                .expect("Failed to create window"),
+        );
+
+        // Restore window position if saved
+        if let (Some(x), Some(y)) = (session.window_x, session.window_y) {
+            let _ = window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
+        }
+
+        let terminal_app = TerminalApp::new(window, config, session);
+        self.app = Some(terminal_app);
     }
 
     fn window_event(

@@ -147,8 +147,6 @@ pub struct TerminalApp {
     dragging_divider: Option<usize>,
     /// Cursor Y at the start of the drag (screen coordinates).
     drag_start_y: f64,
-    /// Whether the last render() actually presented a frame (not skipped).
-    frame_rendered: bool,
 }
 
 impl TerminalApp {
@@ -209,7 +207,6 @@ impl TerminalApp {
             hovered_close_button: None,
             dragging_divider: None,
             drag_start_y: 0.0,
-            frame_rendered: false,
         };
 
         // Resize all panes to the initial window size
@@ -246,14 +243,10 @@ impl TerminalApp {
             WindowEvent::RedrawRequested => {
                 self.process_pty_output();
                 self.render();
-                // Only consume the redraw flag when the frame was actually
-                // presented. On Wayland the first `begin_frame()` can
-                // transiently return Timeout — keep retrying.
-                if self.frame_rendered {
-                    self.needs_redraw = false;
-                } else {
-                    self.window.request_redraw();
-                }
+                // If the frame was skipped (e.g. Wayland initial configure
+                // handshake not yet done), keep needs_redraw so the event
+                // loop keeps trying.
+                self.needs_redraw = self.renderer.frame_skipped();
             }
             _ => {}
         }
@@ -349,7 +342,6 @@ impl TerminalApp {
     }
 
     /// Renders all visible panes + tab bar + overlays.
-    /// Sets `frame_rendered` to true only if the frame was actually presented.
     fn render(&mut self) {
         // Cache the viewports for visible panes
         let win_size = self.window.inner_size();
@@ -359,13 +351,11 @@ impl TerminalApp {
             .compute_pane_viewports(win_size.width, win_size.height);
 
         if self.pane_viewports.is_empty() {
-            self.frame_rendered = true;
             return;
         }
 
         if let Err(e) = self.renderer.begin_frame() {
             eprintln!("Begin frame error: {}", e);
-            self.frame_rendered = false;
             return;
         }
 
@@ -404,7 +394,6 @@ impl TerminalApp {
         if let Err(e) = self.renderer.end_frame() {
             eprintln!("End frame error: {}", e);
         }
-        self.frame_rendered = !skipped;
     }
 
     /// Renders the tab bar at the top of the window.

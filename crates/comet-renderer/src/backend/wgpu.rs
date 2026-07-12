@@ -650,31 +650,53 @@ impl RenderBackend for WgpuBackend {
     fn begin_frame(&mut self) -> RendererResult<()> {
         let ctx = self.ctx()?;
 
-        match ctx.surface.get_current_texture() {
-            Ok(output) => {
-                let encoder = ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Render Encoder"),
-                    });
-                *self.frame.lock() = Some(FrameResources { output, encoder });
-                self.frame_skipped = false;
-                self.first_pane_this_frame = true;
-                Ok(())
+        // Retry up to 10 times on Timeout (Wayland initial configure handshake
+        // may take a few event-loop iterations to complete).
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY_MS: u64 = 10;
+        let mut last_error = None;
+        for _ in 0..MAX_RETRIES {
+            match ctx.surface.get_current_texture() {
+                Ok(output) => {
+                    let encoder = ctx
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Render Encoder"),
+                        });
+                    *self.frame.lock() = Some(FrameResources { output, encoder });
+                    self.frame_skipped = false;
+                    self.first_pane_this_frame = true;
+                    return Ok(());
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    match &last_error {
+                        Some(wgpu::SurfaceError::Timeout)
+                        | Some(wgpu::SurfaceError::Outdated) => {
+                            std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                        }
+                        _ => break,
+                    }
+                }
             }
-            Err(wgpu::SurfaceError::Timeout) => {
+        }
+
+        // All retries exhausted — handle the final error
+        match last_error {
+            Some(wgpu::SurfaceError::Timeout) => {
                 self.frame_skipped = true;
                 Ok(())
             }
-            Err(wgpu::SurfaceError::Outdated) => {
+            Some(wgpu::SurfaceError::Outdated) => {
                 ctx.surface.configure(&ctx.device, &ctx.config);
                 self.frame_skipped = true;
                 Ok(())
             }
-            Err(wgpu::SurfaceError::Lost) => Err(RendererError::backend("Surface lost")),
-            Err(wgpu::SurfaceError::OutOfMemory) => {
+            Some(wgpu::SurfaceError::Lost) => Err(RendererError::backend("Surface lost")),
+            Some(wgpu::SurfaceError::OutOfMemory) => {
                 Err(RendererError::backend("Surface out of memory"))
             }
+            None => Err(RendererError::backend("Unknown surface error")),
         }
     }
 
@@ -689,6 +711,9 @@ impl RenderBackend for WgpuBackend {
             let ctx = self.ctx()?;
             let command_buffer = resources.encoder.finish();
             ctx.queue.submit(std::iter::once(command_buffer));
+            // Present here so the output is consumed together with the
+            // encoder — otherwise `present()` would find an empty frame.
+            resources.output.present();
         }
         Ok(())
     }
@@ -1108,10 +1133,7 @@ impl RenderBackend for WgpuBackend {
     }
 
     fn present(&mut self) -> RendererResult<()> {
-        let mut frame = self.frame.lock();
-        if let Some(resources) = frame.take() {
-            resources.output.present();
-        }
+        // Frame was already consumed and presented in end_frame().
         Ok(())
     }
 
