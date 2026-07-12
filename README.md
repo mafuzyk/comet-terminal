@@ -158,8 +158,10 @@ cargo build --release
 # (optional) Install to ~/.cargo/bin
 cargo install --path crates/comet
 
-# (optional) Add desktop entry for launchers (KDE, GNOME, etc.)
+# (optional) Add desktop entry and icon for launchers (KDE, GNOME, etc.)
 cp assets/comet.desktop ~/.local/share/applications/
+mkdir -p ~/.local/share/icons/hicolor/scalable/apps
+cp assets/comet.svg ~/.local/share/icons/hicolor/scalable/apps/
 update-desktop-database ~/.local/share/applications/
 ```
 
