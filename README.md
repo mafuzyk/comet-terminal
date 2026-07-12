@@ -248,11 +248,18 @@ Comet reads configuration from:
 
 | Platform | Path |
 |----------|------|
-| Linux | `~/.config/comet/config.toml` |
-| macOS | `~/Library/Application Support/comet/config.toml` |
-| Windows | `C:\Users\<user>\AppData\Roaming\comet\config.toml` |
+| Linux | `~/.config/atlas/comet/config.toml` |
+| macOS | `~/Library/Application Support/atlas/comet/config.toml` |
+| Windows | `C:\Users\<user>\AppData\Roaming\atlas\comet\config.toml` |
 
-Themes are loaded from `themes/` in the same directory.
+Themes are loaded from `themes/` in the same directory (e.g., `~/.config/atlas/comet/themes/`).
+
+All Atlas ecosystem tools share the `~/.config/atlas/` base directory:
+- **Comet**: `~/.config/atlas/comet/`
+- **AtlasWM**: `~/.config/atlas/atlaswm/`
+- **AtlasFetch**: `~/.config/atlas/atlasfetch/`
+
+This makes it easy to migrate or share configuration across the Atlas suite.
 
 ### Example `config.toml`
 

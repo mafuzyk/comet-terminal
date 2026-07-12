@@ -645,18 +645,15 @@ pub fn load_config_from(path: &std::path::Path) -> ConfigResult<Config> {
 
 /// Get the default config file path.
 pub fn config_path() -> ConfigResult<PathBuf> {
-    let proj = ProjectDirs::from("com", "comet-terminal", "comet").ok_or_else(|| {
-        ConfigError::ConfigDir("Could not determine config directory".to_string())
-    })?;
-    Ok(proj.config_dir().join("config.toml"))
+    Ok(config_dir()?.join("config.toml"))
 }
 
 /// Get the config directory path.
 pub fn config_dir() -> ConfigResult<PathBuf> {
-    let proj = ProjectDirs::from("com", "comet-terminal", "comet").ok_or_else(|| {
+    let atlas = ProjectDirs::from("", "", "atlas").ok_or_else(|| {
         ConfigError::ConfigDir("Could not determine config directory".to_string())
     })?;
-    Ok(proj.config_dir().to_path_buf())
+    Ok(atlas.config_dir().join("comet"))
 }
 
 impl Config {
