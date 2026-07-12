@@ -4,6 +4,6 @@ Comment=GPU-accelerated terminal emulator
 Exec=comet
 Terminal=false
 Type=Application
-Icon=comet
+Icon=utilities-terminal
 Categories=System;TerminalEmulator;
 StartupNotify=true
