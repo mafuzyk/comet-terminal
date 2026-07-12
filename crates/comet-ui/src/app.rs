@@ -147,6 +147,8 @@ pub struct TerminalApp {
     dragging_divider: Option<usize>,
     /// Cursor Y at the start of the drag (screen coordinates).
     drag_start_y: f64,
+    /// Whether the last render() actually presented a frame (not skipped).
+    frame_rendered: bool,
 }
 
 impl TerminalApp {
@@ -207,6 +209,7 @@ impl TerminalApp {
             hovered_close_button: None,
             dragging_divider: None,
             drag_start_y: 0.0,
+            frame_rendered: false,
         };
 
         // Resize all panes to the initial window size
@@ -243,7 +246,14 @@ impl TerminalApp {
             WindowEvent::RedrawRequested => {
                 self.process_pty_output();
                 self.render();
-                self.needs_redraw = false;
+                // Only consume the redraw flag when the frame was actually
+                // presented. On Wayland the first `begin_frame()` can
+                // transiently return Timeout — keep retrying.
+                if self.frame_rendered {
+                    self.needs_redraw = false;
+                } else {
+                    self.window.request_redraw();
+                }
             }
             _ => {}
         }
@@ -333,13 +343,13 @@ impl TerminalApp {
         self.needs_redraw
     }
 
-    /// Requests a redraw on the window and resets the flag.
+    /// Requests a redraw on the window.
     pub fn request_redraw(&mut self) {
-        self.needs_redraw = false;
         self.window.request_redraw();
     }
 
     /// Renders all visible panes + tab bar + overlays.
+    /// Sets `frame_rendered` to true only if the frame was actually presented.
     fn render(&mut self) {
         // Cache the viewports for visible panes
         let win_size = self.window.inner_size();
@@ -349,43 +359,52 @@ impl TerminalApp {
             .compute_pane_viewports(win_size.width, win_size.height);
 
         if self.pane_viewports.is_empty() {
+            self.frame_rendered = true;
             return;
         }
 
         if let Err(e) = self.renderer.begin_frame() {
             eprintln!("Begin frame error: {}", e);
+            self.frame_rendered = false;
             return;
         }
 
-        for vp in &self.pane_viewports {
-            let pane_id = vp.pane_id;
-            let Some(session) = self.manager.session_by_pane_id_mut(pane_id) else {
-                continue;
-            };
-            let Some(state) = self.pane_states.get_mut(&pane_id) else {
-                continue;
-            };
-            let terminal = session.terminal();
-            if let Err(e) = self
-                .renderer
-                .render_pane(terminal, vp.to_render_viewport(), state)
-            {
-                eprintln!("Render pane error: {}", e);
+        // Check if the frame was skipped (transient Timeout on Wayland).
+        // Must capture BEFORE end_frame() which resets the flag.
+        let skipped = self.renderer.frame_skipped();
+
+        if !skipped {
+            for vp in &self.pane_viewports {
+                let pane_id = vp.pane_id;
+                let Some(session) = self.manager.session_by_pane_id_mut(pane_id) else {
+                    continue;
+                };
+                let Some(state) = self.pane_states.get_mut(&pane_id) else {
+                    continue;
+                };
+                let terminal = session.terminal();
+                if let Err(e) = self
+                    .renderer
+                    .render_pane(terminal, vp.to_render_viewport(), state)
+                {
+                    eprintln!("Render pane error: {}", e);
+                }
             }
+
+            // Render split dividers between panes
+            self.render_dividers(win_size.width, win_size.height);
+
+            // Render focus indicator around the active pane
+            self.render_focus_indicator(win_size.width, win_size.height);
+
+            // Render tab bar overlay (background + tab titles)
+            self.render_tab_bar(win_size.width);
         }
-
-        // Render split dividers between panes
-        self.render_dividers(win_size.width, win_size.height);
-
-        // Render focus indicator around the active pane
-        self.render_focus_indicator(win_size.width, win_size.height);
-
-        // Render tab bar overlay (background + tab titles)
-        self.render_tab_bar(win_size.width);
 
         if let Err(e) = self.renderer.end_frame() {
             eprintln!("End frame error: {}", e);
         }
+        self.frame_rendered = !skipped;
     }
 
     /// Renders the tab bar at the top of the window.

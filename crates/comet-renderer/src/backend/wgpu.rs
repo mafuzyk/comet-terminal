@@ -1123,6 +1123,10 @@ impl RenderBackend for WgpuBackend {
         self.ctx.is_some()
     }
 
+    fn frame_skipped(&self) -> bool {
+        self.frame_skipped
+    }
+
     fn create_atlas_texture(&mut self, width: u32, height: u32) -> RendererResult<AtlasTexture> {
         let ctx = self.ctx()?;
         let id = self.next_id();

@@ -142,6 +142,12 @@ pub trait RenderBackend: Send + Sync {
     /// Checks if the backend is ready for rendering.
     fn is_ready(&self) -> bool;
 
+    /// Returns true if the most recent `begin_frame()` was skipped
+    /// (e.g. transient `Timeout` on Wayland). Resets after `end_frame()`.
+    fn frame_skipped(&self) -> bool {
+        false
+    }
+
     /// Returns boxed GPU device+queue for atlas creation, if available.
     /// The concrete type is `(Arc<wgpu::Device>, Arc<wgpu::Queue>)`.
     fn gpu_resources(&self) -> Option<Box<dyn std::any::Any>> {

@@ -322,6 +322,12 @@ impl Renderer {
         Ok(())
     }
 
+    /// Returns true if the most recent `begin_frame()` was skipped
+    /// (transient error, e.g. Wayland `Timeout`). Resets after `end_frame()`.
+    pub fn frame_skipped(&self) -> bool {
+        self.backend.frame_skipped()
+    }
+
     /// Ends the current frame and presents.
     pub fn end_frame(&mut self) -> RendererResult<()> {
         self.backend.end_frame()?;
