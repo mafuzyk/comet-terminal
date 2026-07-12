@@ -1,6 +1,6 @@
 //! Spawn e gerenciamento do PTY (pseudo-terminal).
 
-use portable_pty::{CommandBuilder, PtyPair, PtySize};
+use portable_pty::{CommandBuilder, PtyPair, PtySize, MasterPty};
 use std::io::{Read, Write};
 use thiserror::Error;
 
@@ -47,8 +47,10 @@ pub enum PtyError {
 }
 
 /// Wrapper do processo PTY com reader/writer.
+/// Guarda apenas o master (o slave é dropado após spawn para que EOF
+/// seja entregue quando o filho morre).
 pub struct PtyProcess {
-    pair: PtyPair,
+    master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
@@ -74,12 +76,14 @@ impl PtyProcess {
         })?;
 
         let child = pair.slave.spawn_command(cmd)?;
+        // Drop the slave fd so the master sees EOF when the child exits.
+        drop(pair.slave);
 
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
         Ok(Self {
-            pair,
+            master: pair.master,
             child,
             reader,
             writer,
@@ -88,7 +92,7 @@ impl PtyProcess {
 
     /// Redimensiona o PTY.
     pub fn resize(&self, size: PtySize) -> Result<(), PtyError> {
-        self.pair.master.resize(size)?;
+        self.master.resize(size)?;
         Ok(())
     }
 
@@ -115,8 +119,8 @@ impl PtyProcess {
             .map_err(|e| PtyError::Process(e.to_string()))
     }
 
-    /// Retorna o PtyPair para acesso avançado.
-    pub fn pair(&self) -> &PtyPair {
-        &self.pair
+    /// Retorna o master PTY para acesso avançado.
+    pub fn master(&self) -> &dyn MasterPty {
+        self.master.as_ref()
     }
 }

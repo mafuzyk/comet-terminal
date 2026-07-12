@@ -650,53 +650,31 @@ impl RenderBackend for WgpuBackend {
     fn begin_frame(&mut self) -> RendererResult<()> {
         let ctx = self.ctx()?;
 
-        // Retry up to 10 times on Timeout (Wayland initial configure handshake
-        // may take a few event-loop iterations to complete).
-        const MAX_RETRIES: u32 = 10;
-        const RETRY_DELAY_MS: u64 = 10;
-        let mut last_error = None;
-        for _ in 0..MAX_RETRIES {
-            match ctx.surface.get_current_texture() {
-                Ok(output) => {
-                    let encoder = ctx
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Render Encoder"),
-                        });
-                    *self.frame.lock() = Some(FrameResources { output, encoder });
-                    self.frame_skipped = false;
-                    self.first_pane_this_frame = true;
-                    return Ok(());
-                }
-                Err(err) => {
-                    last_error = Some(err);
-                    match &last_error {
-                        Some(wgpu::SurfaceError::Timeout)
-                        | Some(wgpu::SurfaceError::Outdated) => {
-                            std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
-                        }
-                        _ => break,
-                    }
-                }
+        match ctx.surface.get_current_texture() {
+            Ok(output) => {
+                let encoder = ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Render Encoder"),
+                    });
+                *self.frame.lock() = Some(FrameResources { output, encoder });
+                self.frame_skipped = false;
+                self.first_pane_this_frame = true;
+                Ok(())
             }
-        }
-
-        // All retries exhausted — handle the final error
-        match last_error {
-            Some(wgpu::SurfaceError::Timeout) => {
+            Err(wgpu::SurfaceError::Timeout) => {
                 self.frame_skipped = true;
                 Ok(())
             }
-            Some(wgpu::SurfaceError::Outdated) => {
+            Err(wgpu::SurfaceError::Outdated) => {
                 ctx.surface.configure(&ctx.device, &ctx.config);
                 self.frame_skipped = true;
                 Ok(())
             }
-            Some(wgpu::SurfaceError::Lost) => Err(RendererError::backend("Surface lost")),
-            Some(wgpu::SurfaceError::OutOfMemory) => {
+            Err(wgpu::SurfaceError::Lost) => Err(RendererError::backend("Surface lost")),
+            Err(wgpu::SurfaceError::OutOfMemory) => {
                 Err(RendererError::backend("Surface out of memory"))
             }
-            None => Err(RendererError::backend("Unknown surface error")),
         }
     }
 

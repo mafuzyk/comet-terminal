@@ -16,7 +16,7 @@ impl PtyTerminal {
     /// Cria um novo terminal com PTY spawneado.
     pub fn new(config: PtyConfig) -> Result<Self, PtyError> {
         let pty = PtyProcess::spawn(config)?;
-        let size = pty.pair().master.get_size()?;
+        let size = pty.master().get_size()?;
         let core = CoreTerminal::new(size.cols as usize, size.rows as usize);
         Ok(Self {
             core,

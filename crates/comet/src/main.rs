@@ -11,6 +11,28 @@ use winit::{
 
 mod icon;
 
+/// Force a synchronous Wayland roundtrip to complete the xdg_surface configure
+/// handshake. Without this, `wgpu::Surface::get_current_texture()` returns
+/// `SurfaceError::Timeout` on the first frame because the compositor's
+/// configure event hasn't been processed yet — and sleeping in the render
+/// callback would block the event loop from ever processing it.
+#[cfg(target_os = "linux")]
+fn wayland_roundtrip(window: &Arc<winit::window::Window>) {
+    use winit::raw_window_handle::HasDisplayHandle;
+    if let Ok(handle) = window.display_handle() {
+        if let winit::raw_window_handle::RawDisplayHandle::Wayland(wayland) = handle.as_raw() {
+            let display = wayland.display.as_ptr();
+            #[link(name = "wayland-client")]
+            unsafe extern "C" {
+                fn wl_display_roundtrip(display: *mut std::ffi::c_void) -> std::ffi::c_int;
+            }
+            unsafe {
+                wl_display_roundtrip(display);
+            }
+        }
+    }
+}
+
 struct CometApp {
     app: Option<TerminalApp>,
 }
@@ -49,9 +71,14 @@ impl ApplicationHandler for CometApp {
         if let (Some(x), Some(y)) = (session.window_x, session.window_y) {
             let _ = window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
         }
+let terminal_app = TerminalApp::new(window.clone(), config, session);
 
-        let terminal_app = TerminalApp::new(window, config, session);
-        self.app = Some(terminal_app);
+            // On Wayland, force a display roundtrip so the xdg_surface configure
+            // handshake completes before the first render callback.
+            #[cfg(target_os = "linux")]
+            wayland_roundtrip(&window);
+
+            self.app = Some(terminal_app);
     }
 
     fn window_event(

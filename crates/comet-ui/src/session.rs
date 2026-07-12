@@ -32,8 +32,7 @@ impl TerminalSession {
         let pty = PtyProcess::spawn(pty_config).expect("Failed to spawn PTY");
 
         let bg_reader = pty
-            .pair()
-            .master
+            .master()
             .try_clone_reader()
             .expect("Failed to clone PTY reader");
 
