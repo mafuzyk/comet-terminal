@@ -1,6 +1,9 @@
 //! CPU software rendering backend.
 
-use crate::backend::{AtlasTexture, BackendConfig, BackendType, Buffer, IndexBuffer, Pipeline, RenderBackend, UniformBuffer, VertexBuffer};
+use crate::backend::{
+    AtlasTexture, BackendConfig, BackendType, Buffer, IndexBuffer, Pipeline, RenderBackend,
+    UniformBuffer, VertexBuffer,
+};
 use crate::error::{RendererError, RendererResult};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -18,7 +21,7 @@ pub struct CpuBackend {
 
 struct CpuTexture {
     width: u32,
-    height: u32,
+    _height: u32,
     data: Vec<u8>,
 }
 
@@ -97,7 +100,7 @@ impl RenderBackend for CpuBackend {
         Ok(())
     }
 
-    fn render(&mut self, _context: &crate::renderer::RenderContext) -> RendererResult<()> {
+    fn render(&mut self, _context: &mut crate::renderer::RenderContext) -> RendererResult<()> {
         Ok(())
     }
 
@@ -117,14 +120,22 @@ impl RenderBackend for CpuBackend {
         let id = self.next_id();
         let texture = CpuTexture {
             width,
-            height,
+            _height: height,
             data: vec![0u8; (width * height) as usize],
         };
         self.textures.lock().insert(id, texture);
         Ok(AtlasTexture { id, width, height })
     }
 
-    fn update_atlas(&mut self, texture: &AtlasTexture, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> RendererResult<()> {
+    fn update_atlas(
+        &mut self,
+        texture: &AtlasTexture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> RendererResult<()> {
         let mut textures = self.textures.lock();
         if let Some(tex) = textures.get_mut(&texture.id) {
             for row in 0..height {
@@ -132,7 +143,8 @@ impl RenderBackend for CpuBackend {
                 let dst_start = ((y + row) * tex.width + x) as usize;
                 let dst_end = dst_start + width as usize;
                 if dst_end <= tex.data.len() {
-                    tex.data[dst_start..dst_end].copy_from_slice(&data[src_start..src_start + width as usize]);
+                    tex.data[dst_start..dst_end]
+                        .copy_from_slice(&data[src_start..src_start + width as usize]);
                 }
             }
             Ok(())
@@ -143,20 +155,47 @@ impl RenderBackend for CpuBackend {
 
     fn create_vertex_buffer(&mut self, data: &[u8]) -> RendererResult<VertexBuffer> {
         let id = self.next_id();
-        self.buffers.lock().insert(id, CpuBuffer { data: data.to_vec(), id });
-        Ok(VertexBuffer { id, size: data.len() })
+        self.buffers.lock().insert(
+            id,
+            CpuBuffer {
+                data: data.to_vec(),
+                id,
+            },
+        );
+        Ok(VertexBuffer {
+            id,
+            size: data.len(),
+        })
     }
 
     fn create_index_buffer(&mut self, data: &[u8]) -> RendererResult<IndexBuffer> {
         let id = self.next_id();
-        self.buffers.lock().insert(id, CpuBuffer { data: data.to_vec(), id });
-        Ok(IndexBuffer { id, count: data.len() as u32 / 2 })
+        self.buffers.lock().insert(
+            id,
+            CpuBuffer {
+                data: data.to_vec(),
+                id,
+            },
+        );
+        Ok(IndexBuffer {
+            id,
+            count: data.len() as u32 / 2,
+        })
     }
 
     fn create_uniform_buffer(&mut self, data: &[u8]) -> RendererResult<UniformBuffer> {
         let id = self.next_id();
-        self.buffers.lock().insert(id, CpuBuffer { data: data.to_vec(), id });
-        Ok(UniformBuffer { id, size: data.len() })
+        self.buffers.lock().insert(
+            id,
+            CpuBuffer {
+                data: data.to_vec(),
+                id,
+            },
+        );
+        Ok(UniformBuffer {
+            id,
+            size: data.len(),
+        })
     }
 
     fn update_buffer(&mut self, buffer: &mut dyn Buffer, data: &[u8]) -> RendererResult<()> {
@@ -178,7 +217,12 @@ impl RenderBackend for CpuBackend {
         Ok(())
     }
 
-    fn draw(&mut self, _vertices: &VertexBuffer, _indices: Option<&IndexBuffer>, _instances: u32) -> RendererResult<()> {
+    fn draw(
+        &mut self,
+        _vertices: &VertexBuffer,
+        _indices: Option<&IndexBuffer>,
+        _instances: u32,
+    ) -> RendererResult<()> {
         Ok(())
     }
 }

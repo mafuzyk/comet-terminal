@@ -110,7 +110,9 @@ impl PtyProcess {
 
     /// Mata o processo.
     pub fn kill(&mut self) -> Result<(), PtyError> {
-        self.child.kill().map_err(|e| PtyError::Process(e.to_string()))
+        self.child
+            .kill()
+            .map_err(|e| PtyError::Process(e.to_string()))
     }
 
     /// Retorna o PtyPair para acesso avançado.

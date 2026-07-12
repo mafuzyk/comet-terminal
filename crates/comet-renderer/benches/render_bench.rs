@@ -1,5 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use comet_core::Terminal;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_render_80x24(c: &mut Criterion) {
     c.bench_function("render_80x24", |b| {

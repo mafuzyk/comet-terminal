@@ -1,31 +1,29 @@
-use std::io::Read;
-use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
-use std::thread;
+use std::time::{Duration, Instant};
 
-use comet_config::Config;
-use comet_core::Terminal;
-use comet_pty::{AnsiParser, PtyConfig, PtyProcess};
-use comet_renderer::{BackendType, HasWindowHandle, Renderer, RendererConfig};
+use comet_config::{Config, ConfigWatcher, Session};
+use comet_renderer::{HasWindowHandle, Renderer, RendererConfig};
 use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle};
 use winit::{
-    event::{Modifiers, WindowEvent},
+    event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent},
+    keyboard::{KeyCode, PhysicalKey},
     raw_window_handle::HasWindowHandle as RawHasWindowHandle,
     window::Window,
 };
 
 use crate::input::key_event_to_ansi;
+use crate::manager::TerminalManager;
 
-/// Wraps an `Arc<Window>` so the renderer can create a GPU surface from it.
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+
+/// Wraps an `Arc<Window>` so the renderer can create a GPU surface.
 struct WindowOwner(Arc<Window>);
 
 unsafe impl Send for WindowOwner {}
 unsafe impl Sync for WindowOwner {}
 
 impl RawHasWindowHandle for WindowOwner {
-    fn window_handle(
-        &self,
-    ) -> Result<winit::raw_window_handle::WindowHandle<'_>, HandleError> {
+    fn window_handle(&self) -> Result<winit::raw_window_handle::WindowHandle<'_>, HandleError> {
         self.0.window_handle()
     }
 }
@@ -36,114 +34,58 @@ impl HasDisplayHandle for WindowOwner {
     }
 }
 
-// Blanket impl from comet-renderer covers WindowOwner
-
-/// Terminal application state — owns the PTY, terminal state, renderer, and window.
+/// Terminal application state — owns sessions, window, and top-level event handling.
 pub struct TerminalApp {
-    terminal: Terminal,
-    pty: PtyProcess,
-    renderer: Renderer,
+    manager: TerminalManager,
     window: Arc<Window>,
-    pty_rx: Receiver<Vec<u8>>,
-    thread_handle: Option<thread::JoinHandle<()>>,
     needs_redraw: bool,
     modifiers: Modifiers,
+    config: Config,
+    config_watcher: ConfigWatcher,
+    session: Session,
+    is_selecting: bool,
+    clipboard: arboard::Clipboard,
+    click_count: u32,
+    last_click_time: Instant,
+    last_click_pos: (f64, f64),
+    mouse_pos: (f64, f64),
 }
 
 impl TerminalApp {
     /// Creates a new terminal application.
-    pub fn new(window: Arc<Window>, config: Config) -> Self {
+    pub fn new(window: Arc<Window>, config: Config, session: Session) -> Self {
         let window_size = window.inner_size();
 
-        // Spawn PTY
-        let pty_config = PtyConfig {
-            cols: 80,
-            rows: 24,
-            ..PtyConfig::default()
-        };
-        let pty = PtyProcess::spawn(pty_config).expect("Failed to spawn PTY");
+        let manager = TerminalManager::new(&config);
 
-        // Clone a reader for the background thread
-        let bg_reader = pty
-            .pair()
-            .master
-            .try_clone_reader()
-            .expect("Failed to clone PTY reader");
-
-        // Create terminal core
-        let terminal = Terminal::new(80, 24);
-
-        // Background thread: reads PTY output, sends raw bytes through channel
-        let (pty_tx, pty_rx) = mpsc::channel();
-        // Clone window Arc for background thread to wake up the event loop
-        let wakeup_window = window.clone();
-        let handle = thread::spawn(move || {
-            let mut reader = bg_reader;
-            let mut buf = vec![0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break, // EOF
-                    Ok(n) => {
-                        let data = buf[..n].to_vec();
-                        if pty_tx.send(data).is_err() {
-                            break;
-                        }
-                        // Wake up the event loop so PTY output is consumed and
-                        // rendered without blocking on window events.
-                        wakeup_window.request_redraw();
-                    }
-                    Err(e) => {
-                        eprintln!("PTY read error: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Create renderer from config
-        let renderer_config = RendererConfig {
-            backend: BackendType::Wgpu,
-            font_family: config.font.family.clone(),
-            font_size: config.font.size,
-            theme: "dark".to_string(),
-            dpi_scale: 1.0,
-            padding_x: 2.0,
-            padding_y: 2.0,
-            cursor_blink: config.cursor.blink,
-            cursor_shape: match config.cursor.style.as_str() {
-                "beam" => comet_renderer::cursor::CursorShape::Beam,
-                "underline" => comet_renderer::cursor::CursorShape::Underline,
-                "hollow_block" => comet_renderer::cursor::CursorShape::HollowBlock,
-                "bar" => comet_renderer::cursor::CursorShape::Bar,
-                _ => comet_renderer::cursor::CursorShape::Block,
-            },
-            colors: Some(comet_renderer::CustomColors {
-                background: config.colors.background.clone(),
-                foreground: config.colors.foreground.clone(),
-                cursor: config.colors.cursor.clone(),
-                selection: config.colors.selection.clone(),
-            }),
-        };
-        let mut renderer =
-            Renderer::new(renderer_config).expect("Failed to create renderer");
-        renderer
-            .initialize(
-                window_size.width,
-                window_size.height,
-                Some(Box::new(WindowOwner(window.clone())) as Box<dyn HasWindowHandle>),
-            )
-            .expect("Failed to initialize renderer");
-
-        Self {
-            terminal,
-            pty,
-            renderer,
+        let mut app = Self {
+            manager,
             window,
-            pty_rx,
-            thread_handle: Some(handle),
             needs_redraw: true,
             modifiers: Modifiers::default(),
-        }
+            config,
+            config_watcher: ConfigWatcher::new().unwrap_or_else(|_| ConfigWatcher::dummy()),
+            session,
+            is_selecting: false,
+            clipboard: arboard::Clipboard::new().expect("Failed to initialize clipboard"),
+            click_count: 0,
+            last_click_time: Instant::now(),
+            last_click_pos: (0.0, 0.0),
+            mouse_pos: (0.0, 0.0),
+        };
+
+        // Initialize the active session's renderer
+        let active = app.manager.active_mut();
+        active.init_renderer(
+            window_size.width,
+            window_size.height,
+            Some(Box::new(WindowOwner(app.window.clone())) as Box<dyn HasWindowHandle>),
+        );
+        active
+            .renderer_mut()
+            .set_show_diagnostics(app.config.debug.show_fps);
+
+        app
     }
 
     /// Handles a winit window event.
@@ -158,32 +100,101 @@ impl TerminalApp {
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_key(event);
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_pos = (position.x, position.y);
+                self.handle_mouse_move(position.x, position.y);
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let (x, y) = self.mouse_pos;
+                self.handle_mouse_button(*state, *button, x, y);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.handle_mouse_wheel(delta);
+            }
             WindowEvent::RedrawRequested => {
-                // Always consume pending PTY data before rendering so the
-                // frame reflects the latest terminal state.
                 self.process_pty_output();
                 self.render();
-                // Clear flag — any new data that arrived between
-                // process_pty_output and render will be picked up by
-                // about_to_wait and trigger another redraw.
                 self.needs_redraw = false;
             }
             _ => {}
         }
     }
 
-    /// Processes pending PTY output.
-    /// Should be called each iteration before deciding whether to redraw.
+    /// Processes pending PTY output and checks for config changes.
     pub fn process_pty_output(&mut self) {
-        let mut any_data = false;
-        while let Ok(data) = self.pty_rx.try_recv() {
-            any_data = true;
-            let mut parser = AnsiParser::new(&mut self.terminal);
-            parser.feed(&data);
-        }
-        if any_data {
+        let had_data = self.manager.active_mut().process_output();
+        if had_data {
             self.needs_redraw = true;
+            self.window.request_redraw();
         }
+
+        // Check for config file changes
+        if self.config_watcher.check() {
+            self.reload_config();
+        }
+    }
+
+    /// Reload configuration from disk and apply changes.
+    fn reload_config(&mut self) {
+        let Ok(new_config) = comet_config::load_config() else {
+            return;
+        };
+
+        let old = &self.config;
+        let new = &new_config;
+
+        // Apply font/color/cursor changes
+        if old.font != new.font || old.colors != new.colors || old.cursor != new.cursor {
+            let rc = RendererConfig {
+                backend: comet_renderer::BackendType::Wgpu,
+                font_family: new.font.family.clone(),
+                font_size: new.font.size,
+                theme: "dark".to_string(),
+                dpi_scale: 1.0,
+                padding_x: 2.0,
+                padding_y: 2.0,
+                cursor_blink: new.cursor.blink,
+                cursor_shape: match new.cursor.style.as_str() {
+                    "beam" => comet_renderer::cursor::CursorShape::Beam,
+                    "underline" => comet_renderer::cursor::CursorShape::Underline,
+                    "hollow_block" => comet_renderer::cursor::CursorShape::HollowBlock,
+                    "bar" => comet_renderer::cursor::CursorShape::Bar,
+                    _ => comet_renderer::cursor::CursorShape::Block,
+                },
+                colors: Some(comet_renderer::CustomColors {
+                    background: new.colors.background.clone(),
+                    foreground: new.colors.foreground.clone(),
+                    cursor: new.colors.cursor.clone(),
+                    selection: new.colors.selection.clone(),
+                }),
+            };
+
+            match Renderer::new(rc) {
+                Ok(mut new_renderer) => {
+                    let win_size = self.window.inner_size();
+                    if let Err(e) =
+                        new_renderer.initialize(
+                            win_size.width,
+                            win_size.height,
+                            Some(Box::new(WindowOwner(self.window.clone()))
+                                as Box<dyn HasWindowHandle>),
+                        )
+                    {
+                        eprintln!("Failed to re-initialize renderer on config reload: {}", e);
+                        return;
+                    }
+                    new_renderer.set_show_diagnostics(new.debug.show_fps);
+                    self.manager.active_mut().set_renderer(new_renderer);
+                    self.resize(win_size.width, win_size.height);
+                }
+                Err(e) => {
+                    eprintln!("Failed to create renderer on config reload: {}", e);
+                }
+            }
+        }
+
+        self.needs_redraw = true;
+        self.config = new_config;
     }
 
     /// Returns whether a redraw has been requested.
@@ -199,46 +210,205 @@ impl TerminalApp {
 
     /// Renders the current terminal state.
     fn render(&mut self) {
-        if let Err(e) = self.renderer.render(&self.terminal) {
+        let session = self.manager.active_mut();
+        if let Err(e) = session.render() {
             eprintln!("Render error: {}", e);
         }
     }
 
-    /// Resizes the terminal, PTY, and renderer.
+    /// Resizes the active session.
     fn resize(&mut self, width: u32, height: u32) {
-        let cell_size = self.renderer.metrics().cell_size();
-        let cols = (width / cell_size.width.max(1)).max(1);
-        let rows = (height / cell_size.height.max(1)).max(1);
-
-        // Resize PTY
-        let pty_size = portable_pty::PtySize {
-            rows: rows as u16,
-            cols: cols as u16,
-            pixel_width: width as u16,
-            pixel_height: height as u16,
-        };
-        if let Err(e) = self.pty.resize(pty_size) {
-            eprintln!("PTY resize error: {}", e);
-        }
-
-        // Resize terminal core
-        self.terminal.resize(cols as usize, rows as usize);
-
-        // Resize renderer
-        if let Err(e) = self.renderer.resize(width, height) {
-            eprintln!("Renderer resize error: {}", e);
-        }
-
+        self.manager.active_mut().resize(width, height);
         self.needs_redraw = true;
     }
 
     /// Handles a keyboard event.
     fn handle_key(&mut self, event: &winit::event::KeyEvent) {
+        if !event.state.is_pressed() {
+            return;
+        }
+
+        let session = self.manager.active_mut();
+        session.renderer().cursor_renderer().activity();
+
         let mods = self.modifiers.state();
-        if let Some(bytes) = key_event_to_ansi(event, mods.control_key(), mods.alt_key()) {
-            if let Err(e) = self.pty.writer().write_all(&bytes) {
-                eprintln!("PTY write error: {}", e);
+        let ctrl = mods.control_key();
+        let shift = mods.shift_key();
+
+        // Clipboard shortcuts
+        if ctrl
+            && shift
+            && let PhysicalKey::Code(code) = event.physical_key
+        {
+            match code {
+                KeyCode::KeyC => {
+                    self.copy_selection();
+                    return;
+                }
+                KeyCode::KeyV => {
+                    self.paste_clipboard();
+                    return;
+                }
+                _ => {}
             }
+        }
+
+        // Ctrl+Shift+F: Search (stub)
+        if ctrl && shift && event.physical_key == PhysicalKey::Code(KeyCode::KeyF) {
+            // TODO: open search overlay
+            return;
+        }
+
+        // Scrollback navigation
+        if !ctrl {
+            let terminal = session.terminal_mut();
+            let handled = match event.physical_key {
+                PhysicalKey::Code(KeyCode::PageUp) => {
+                    terminal.scroll_viewport_pages(1);
+                    true
+                }
+                PhysicalKey::Code(KeyCode::PageDown) => {
+                    terminal.scroll_viewport_pages(-1);
+                    true
+                }
+                PhysicalKey::Code(KeyCode::Home) => {
+                    terminal.scroll_viewport_to_top();
+                    true
+                }
+                PhysicalKey::Code(KeyCode::End) => {
+                    terminal.scroll_viewport_to_bottom();
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                self.needs_redraw = true;
+                return;
+            }
+        }
+
+        // Send to PTY
+        if let Some(bytes) = key_event_to_ansi(event, ctrl, mods.alt_key()) {
+            session.write_input(&bytes);
+        }
+    }
+
+    /// Handles mouse movement (selection drag).
+    fn handle_mouse_move(&mut self, x: f64, y: f64) {
+        if !self.is_selecting {
+            return;
+        }
+        let session = self.manager.active();
+        let cell_size = session.renderer().metrics().cell_size();
+        let col = (x / cell_size.width as f64) as usize;
+        let vis_row = (y / cell_size.height as f64) as usize;
+        if vis_row >= session.terminal().height() {
+            return;
+        }
+        let abs_row = session.terminal().visible_row_to_absolute(vis_row);
+        let session = self.manager.active_mut();
+        session.terminal_mut().update_selection(col, abs_row);
+        self.needs_redraw = true;
+    }
+
+    /// Handles mouse button events.
+    fn handle_mouse_button(&mut self, state: ElementState, button: MouseButton, x: f64, y: f64) {
+        match button {
+            MouseButton::Left => match state {
+                ElementState::Pressed => {
+                    let now = Instant::now();
+                    let same_pos = (x - self.last_click_pos.0).abs() < 4.0
+                        && (y - self.last_click_pos.1).abs() < 4.0;
+                    if same_pos && now - self.last_click_time < DOUBLE_CLICK_INTERVAL {
+                        self.click_count += 1;
+                    } else {
+                        self.click_count = 1;
+                    }
+                    self.last_click_time = now;
+                    self.last_click_pos = (x, y);
+
+                    self.is_selecting = true;
+
+                    let session = self.manager.active();
+                    let cell_size = session.renderer().metrics().cell_size();
+                    let col = (x / cell_size.width as f64) as usize;
+                    let vis_row = (y / cell_size.height as f64) as usize;
+                    if vis_row < session.terminal().height() {
+                        let abs_row = session.terminal().visible_row_to_absolute(vis_row);
+                        let session = self.manager.active_mut();
+                        session.terminal_mut().start_selection(col, abs_row);
+                        match self.click_count {
+                            2 => {
+                                session.terminal_mut().expand_selection_to_word();
+                            }
+                            n if n >= 3 => {
+                                session.terminal_mut().expand_selection_to_line();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                ElementState::Released => {
+                    if self.is_selecting {
+                        self.is_selecting = false;
+                        if self.click_count == 1 {
+                            let session = self.manager.active_mut();
+                            session.terminal_mut().end_selection();
+                        }
+                        if self.config.terminal.copy_on_select
+                            && self.manager.active().terminal().has_selection()
+                        {
+                            self.copy_selection();
+                        }
+                        self.needs_redraw = true;
+                    }
+                }
+            },
+            MouseButton::Middle
+                if state == ElementState::Pressed && self.config.terminal.middle_click_paste =>
+            {
+                self.paste_clipboard();
+            }
+            _ => {}
+        }
+    }
+
+    /// Handles mouse wheel events.
+    fn handle_mouse_wheel(&mut self, delta: &MouseScrollDelta) {
+        let session = self.manager.active();
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => *y as isize,
+            MouseScrollDelta::PixelDelta(pos) => {
+                (pos.y / session.renderer().metrics().cell_size().height as f64) as isize
+            }
+        };
+        let terminal = self.manager.active_mut().terminal_mut();
+        if lines > 0 {
+            terminal.scroll_viewport_up(lines as usize);
+        } else if lines < 0 {
+            terminal.scroll_viewport_down((-lines) as usize);
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Copies the current selection to the clipboard.
+    fn copy_selection(&mut self) {
+        let terminal = self.manager.active().terminal();
+        if !terminal.has_selection() {
+            return;
+        }
+        let text = terminal.get_selection_text();
+        if !text.is_empty() {
+            let _ = self.clipboard.set_text(text);
+        }
+    }
+
+    /// Pastes text from the clipboard into the PTY.
+    fn paste_clipboard(&mut self) {
+        if let Ok(text) = self.clipboard.get_text()
+            && !text.is_empty()
+        {
+            self.manager.active_mut().write_input(text.as_bytes());
         }
     }
 
@@ -247,23 +417,19 @@ impl TerminalApp {
         &self.window
     }
 
-    /// Returns a mutable reference to the PTY for external access (e.g., waiting).
-    pub fn pty_mut(&mut self) -> &mut PtyProcess {
-        &mut self.pty
+    /// Returns a reference to the config.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Returns a mutable reference to the terminal manager.
+    pub fn manager_mut(&mut self) -> &mut TerminalManager {
+        &mut self.manager
     }
 }
 
 impl Drop for TerminalApp {
     fn drop(&mut self) {
-        // Kill the child process first. This closes the slave side of the
-        // PTY, causing the background reader thread to get EOF.
-        let _ = self.pty.kill();
-        // Join the background thread so the cloned reader is dropped before
-        // the PtyProcess (which owns the original PtyMaster).
-        if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
-        }
-        // Reap the child process to prevent zombies.
-        let _ = self.pty.wait();
+        // Sessions are cleaned up in TerminalSession::drop
     }
 }

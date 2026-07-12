@@ -20,6 +20,8 @@ pub struct Attributes {
     pub strikethrough: bool,
     pub reverse: bool,
     pub dim: bool,
+    /// Cell is part of a hyperlink (actual URI tracked separately in Terminal).
+    pub hyperlink: bool,
 }
 
 /// Uma única posição da grade do terminal: um caractere e seu estilo.
@@ -57,6 +59,7 @@ impl Cell {
                 strikethrough: false,
                 reverse: false,
                 dim: false,
+                hyperlink: false,
             },
         }
     }

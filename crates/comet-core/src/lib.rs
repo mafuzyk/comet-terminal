@@ -31,10 +31,14 @@ mod cell;
 mod color;
 mod cursor;
 mod grid;
+mod scrollback;
+mod selection;
 mod terminal;
 
 pub use cell::{Attributes, Cell};
 pub use color::Color;
 pub use cursor::Cursor;
 pub use grid::Grid;
+pub use scrollback::{Row, ScrollbackBuffer};
+pub use selection::{Selection, SelectionMode};
 pub use terminal::Terminal;

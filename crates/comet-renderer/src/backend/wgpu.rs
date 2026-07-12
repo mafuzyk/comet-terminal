@@ -1,11 +1,14 @@
 //! WGPU backend implementation.
 
-use crate::atlas::GlyphVertex;
+use crate::atlas::{GlyphAtlas, GlyphVertex};
 use crate::backend::{
-    AtlasTexture, BackendConfig, BackendType, Buffer, HasWindowHandle, IndexBuffer,
-    Pipeline, RenderBackend, UniformBuffer, VertexBuffer,
+    AtlasTexture, BackendConfig, BackendType, Buffer, HasWindowHandle, IndexBuffer, Pipeline,
+    RenderBackend, UniformBuffer, VertexBuffer,
 };
+use crate::colors::ColorPalette;
 use crate::error::{RendererError, RendererResult};
+use crate::glyph_cache::GlyphCache;
+use comet_core::{Row, Terminal};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -106,7 +109,7 @@ struct GraphicsContext {
     surface: wgpu::Surface<'static>,
     /// WGPU adapter (not strictly needed after device creation, but kept for
     /// surface capabilities queries).
-    adapter: wgpu::Adapter,
+    _adapter: wgpu::Adapter,
     /// The logical device.
     device: Arc<Device>,
     /// The command queue.
@@ -149,7 +152,9 @@ impl GraphicsContext {
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
-        .ok_or(RendererError::backend("Failed to find a suitable GPU adapter"))?;
+        .ok_or(RendererError::backend(
+            "Failed to find a suitable GPU adapter",
+        ))?;
 
         let device_descriptor = wgpu::DeviceDescriptor {
             label: Some("Comet Terminal Device"),
@@ -159,10 +164,8 @@ impl GraphicsContext {
             memory_hints: wgpu::MemoryHints::Performance,
         };
 
-        let (device, queue) = pollster::block_on(
-            adapter.request_device(&device_descriptor, None),
-        )
-        .map_err(|e| RendererError::backend(format!("Failed to create device: {}", e)))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor, None))
+            .map_err(|e| RendererError::backend(format!("Failed to create device: {}", e)))?;
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
@@ -194,7 +197,7 @@ impl GraphicsContext {
 
         Ok(Self {
             surface,
-            adapter,
+            _adapter: adapter,
             device,
             queue,
             config,
@@ -236,9 +239,9 @@ impl Buffer for BufferHandle {
 
 struct TextureHandle {
     texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    width: u32,
-    height: u32,
+    _view: wgpu::TextureView,
+    _width: u32,
+    _height: u32,
 }
 
 /// WGPU backend implementation.
@@ -260,8 +263,23 @@ pub struct WgpuBackend {
     /// Set when a non-fatal SurfaceError occurs; subsequent frame methods skip.
     frame_skipped: bool,
 
+    // Reusable vertex buffers to avoid per-frame Vec allocations
+    sel_vertices_buf: Vec<GlyphVertex>,
+    glyph_vertices_buf: Vec<GlyphVertex>,
+
+    // Reusable cursor vertex buffer
+    cursor_vertices_buf: Vec<crate::cursor::CursorVertex>,
+
+    // Persistent GPU vertex buffers (reused across frames, avoiding create_buffer_init)
+    persistent_sel_buffer: Option<wgpu::Buffer>,
+    persistent_glyph_buffer: Option<wgpu::Buffer>,
+    persistent_cursor_buffer: Option<wgpu::Buffer>,
+
+    // Cached bind group (recreated only when atlas texture changes)
+    cached_bind_group: Option<wgpu::BindGroup>,
+    cached_atlas_view_id: u64,
+
     // Resource tracking
-    pipelines: Mutex<HashMap<u64, wgpu::RenderPipeline>>,
     buffers: Mutex<HashMap<u64, BufferHandle>>,
     textures: Mutex<HashMap<u64, TextureHandle>>,
     next_id: Mutex<u64>,
@@ -282,7 +300,19 @@ impl WgpuBackend {
             // Per-frame resources
             frame: Mutex::new(None),
             frame_skipped: false,
-            pipelines: Mutex::new(HashMap::new()),
+            // Reusable vertex buffers
+            sel_vertices_buf: Vec::new(),
+            glyph_vertices_buf: Vec::new(),
+            cursor_vertices_buf: Vec::new(),
+
+            // Persistent GPU buffers (created on first use)
+            persistent_sel_buffer: None,
+            persistent_glyph_buffer: None,
+            persistent_cursor_buffer: None,
+
+            // Cached bind group
+            cached_bind_group: None,
+            cached_atlas_view_id: 0,
             buffers: Mutex::new(HashMap::new()),
             textures: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
@@ -297,7 +327,9 @@ impl WgpuBackend {
     }
 
     fn ctx(&self) -> RendererResult<&GraphicsContext> {
-        self.ctx.as_ref().ok_or(RendererError::backend("Backend not initialized"))
+        self.ctx
+            .as_ref()
+            .ok_or(RendererError::backend("Backend not initialized"))
     }
 
     /// Creates a bind group for the given frame using the current atlas.
@@ -307,9 +339,13 @@ impl WgpuBackend {
         atlas_sampler: &wgpu::Sampler,
     ) -> RendererResult<wgpu::BindGroup> {
         let ctx = self.ctx()?;
-        let layout = self.bind_group_layout.as_ref()
+        let layout = self
+            .bind_group_layout
+            .as_ref()
             .ok_or(RendererError::backend("Bind group layout not created"))?;
-        let uniform_buffer = self.uniform_buffer.as_ref()
+        let uniform_buffer = self
+            .uniform_buffer
+            .as_ref()
             .ok_or(RendererError::backend("Uniform buffer not created"))?;
 
         let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -338,91 +374,101 @@ impl WgpuBackend {
     fn create_pipeline(&mut self, format: TextureFormat) -> RendererResult<()> {
         let ctx = self.ctx()?;
 
-        let vs_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Glyph Vertex Shader"),
-            source: wgpu::ShaderSource::Wgsl(VERTEX_SHADER.into()),
-        });
+        let vs_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Glyph Vertex Shader"),
+                source: wgpu::ShaderSource::Wgsl(VERTEX_SHADER.into()),
+            });
 
-        let fs_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Glyph Fragment Shader"),
-            source: wgpu::ShaderSource::Wgsl(FRAGMENT_SHADER.into()),
-        });
+        let fs_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Glyph Fragment Shader"),
+                source: wgpu::ShaderSource::Wgsl(FRAGMENT_SHADER.into()),
+            });
 
-        let bind_group_layout = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Glyph Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+        let bind_group_layout =
+            ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Glyph Bind Group Layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+
+        let pipeline_layout = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Glyph Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let render_pipeline = ctx
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Glyph Render Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &vs_module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[GlyphVertex::desc()],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
+                fragment: Some(wgpu::FragmentState {
+                    module: &fs_module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
                 },
-            ],
-        });
-
-        let pipeline_layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Glyph Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let render_pipeline = ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Glyph Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vs_module,
-                entry_point: Some("vs_main"),
-                buffers: &[GlyphVertex::desc()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &fs_module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
+                multiview: None,
+                cache: None,
+            });
 
         let uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Glyph Uniform Buffer"),
@@ -442,80 +488,111 @@ impl WgpuBackend {
     fn create_cursor_pipeline(&mut self, format: TextureFormat) -> RendererResult<()> {
         let ctx = self.ctx()?;
 
-        let vs_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Cursor Vertex Shader"),
-            source: wgpu::ShaderSource::Wgsl(VERTEX_SHADER.into()),
-        });
+        let vs_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Cursor Vertex Shader"),
+                source: wgpu::ShaderSource::Wgsl(VERTEX_SHADER.into()),
+            });
 
-        let fs_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Cursor Fragment Shader"),
-            source: wgpu::ShaderSource::Wgsl(CURSOR_FRAGMENT_SHADER.into()),
-        });
+        let fs_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Cursor Fragment Shader"),
+                source: wgpu::ShaderSource::Wgsl(CURSOR_FRAGMENT_SHADER.into()),
+            });
 
-        let bind_group_layout = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Cursor Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+        let bind_group_layout =
+            ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Cursor Bind Group Layout"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+
+        let pipeline_layout = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Cursor Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let render_pipeline = ctx
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Cursor Render Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &vs_module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[crate::atlas::GlyphVertex::desc()],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
-            ],
-        });
-
-        let pipeline_layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Cursor Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let render_pipeline = ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Cursor Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vs_module,
-                entry_point: Some("vs_main"),
-                buffers: &[crate::atlas::GlyphVertex::desc()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &fs_module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
+                fragment: Some(wgpu::FragmentState {
+                    module: &fs_module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+                cache: None,
+            });
 
         self.cursor_bind_group_layout = Some(bind_group_layout);
         self.cursor_pipeline = Some(render_pipeline);
 
         Ok(())
+    }
+
+    /// Ensures a persistent GPU buffer exists with at least the given capacity.
+    /// Grows the buffer if needed (creates new, drops old).
+    fn ensure_buffer(
+        device: &Device,
+        buf: &mut Option<wgpu::Buffer>,
+        label: &str,
+        min_size: u64,
+        usage: wgpu::BufferUsages,
+    ) {
+        let current_size = buf.as_ref().map(|b| b.size()).unwrap_or(0);
+        if current_size >= min_size {
+            return;
+        }
+        let new_size = min_size.max(current_size * 2).max(64);
+        let new_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: new_size,
+            usage,
+            mapped_at_creation: false,
+        });
+        *buf = Some(new_buf);
     }
 }
 
@@ -571,9 +648,11 @@ impl RenderBackend for WgpuBackend {
 
         match ctx.surface.get_current_texture() {
             Ok(output) => {
-                let encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Render Encoder"),
-                });
+                let encoder = ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Render Encoder"),
+                    });
                 *self.frame.lock() = Some(FrameResources { output, encoder });
                 self.frame_skipped = false;
                 Ok(())
@@ -587,9 +666,7 @@ impl RenderBackend for WgpuBackend {
                 self.frame_skipped = true;
                 Ok(())
             }
-            Err(wgpu::SurfaceError::Lost) => {
-                Err(RendererError::backend("Surface lost"))
-            }
+            Err(wgpu::SurfaceError::Lost) => Err(RendererError::backend("Surface lost")),
             Err(wgpu::SurfaceError::OutOfMemory) => {
                 Err(RendererError::backend("Surface out of memory"))
             }
@@ -611,12 +688,107 @@ impl RenderBackend for WgpuBackend {
         Ok(())
     }
 
-    fn render(&mut self, context: &crate::renderer::RenderContext) -> RendererResult<()> {
+    fn render(&mut self, context: &mut crate::renderer::RenderContext) -> RendererResult<()> {
         if self.frame_skipped {
             return Ok(());
         }
 
-        let ctx = self.ctx()?;
+        // Extract rendering data from context (does not borrow self)
+        let terminal = context.terminal;
+        let rows = context.rows;
+        let metrics = context.metrics.metrics();
+        let colors = context.colors;
+        let glyph_cache = context.glyph_cache;
+        let atlas = glyph_cache.atlas();
+
+        let cell_w = metrics.cell_size.width as f32;
+        let cell_h = metrics.cell_size.height as f32;
+        let cols = terminal.width();
+        let sel_bg = colors.selection_bg.to_f32_array();
+        let has_selection = terminal.has_selection();
+
+        // Update cursor renderer position from terminal
+        let (cursor_col, cursor_row) = terminal.cursor().position();
+        context
+            .cursor_renderer
+            .set_position(cursor_col as u32, cursor_row as u32);
+
+        // Build vertex buffers (uses &mut self for reusable buffers)
+        self.sel_vertices_buf.clear();
+        self.glyph_vertices_buf.clear();
+        build_vertex_data(
+            rows,
+            terminal,
+            cols,
+            cell_w,
+            cell_h,
+            metrics.font.line_height,
+            sel_bg,
+            has_selection,
+            glyph_cache,
+            atlas,
+            colors,
+            &mut self.sel_vertices_buf,
+            &mut self.glyph_vertices_buf,
+        )?;
+
+        // Build diagnostics overlay vertices if enabled
+        let mut draw_calls = 0u32;
+        if context.diagnostics.show_overlay {
+            let overlay_text = context.diagnostics.overlay_text();
+            let overlay_font_size = crate::font::FontSize::new(12);
+            let overlay_style = crate::font::FontStyle::normal();
+            let overlay_color = [0.5, 1.0, 0.5, 1.0]; // bright green
+            let mut x = 10.0f32;
+            let y = 4.0f32;
+            for ch in overlay_text.chars() {
+                if let Ok(cached) = glyph_cache.get_glyph(ch, overlay_font_size, overlay_style) {
+                    let rect = cached.rect;
+                    let aw = atlas.dimensions().0 as f32;
+                    let ah = atlas.dimensions().1 as f32;
+                    let u0 = rect.x as f32 / aw;
+                    let v0 = rect.y as f32 / ah;
+                    let u1 = (rect.x + rect.width) as f32 / aw;
+                    let v1 = (rect.y + rect.height) as f32 / ah;
+                    let cw = rect.width as f32;
+                    let ch = rect.height as f32;
+                    self.glyph_vertices_buf
+                        .push(GlyphVertex::new([x, y], [u0, v0], overlay_color));
+                    self.glyph_vertices_buf.push(GlyphVertex::new(
+                        [x + cw, y],
+                        [u1, v0],
+                        overlay_color,
+                    ));
+                    self.glyph_vertices_buf.push(GlyphVertex::new(
+                        [x, y + ch],
+                        [u0, v1],
+                        overlay_color,
+                    ));
+                    self.glyph_vertices_buf.push(GlyphVertex::new(
+                        [x + cw, y],
+                        [u1, v0],
+                        overlay_color,
+                    ));
+                    self.glyph_vertices_buf.push(GlyphVertex::new(
+                        [x + cw, y + ch],
+                        [u1, v1],
+                        overlay_color,
+                    ));
+                    self.glyph_vertices_buf.push(GlyphVertex::new(
+                        [x, y + ch],
+                        [u0, v1],
+                        overlay_color,
+                    ));
+                    x += cached.advance_width;
+                }
+            }
+        }
+
+        // ── GPU section: borrow self immutably for ctx, pipelines ─────────
+        let ctx = self
+            .ctx
+            .as_ref()
+            .ok_or(RendererError::backend("Backend not initialized"))?;
         let render_pipeline = self
             .render_pipeline
             .as_ref()
@@ -631,83 +803,8 @@ impl RenderBackend for WgpuBackend {
             screen_size: [ctx.config.width as f32, ctx.config.height as f32],
             _padding: [0.0; 2],
         };
-        ctx.queue.write_buffer(uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
-
-        // Extract glyph instances from terminal
-        let terminal = context.terminal;
-        let grid = terminal.grid();
-        let metrics = context.metrics.metrics();
-        let colors = context.colors;
-        let glyph_cache = context.glyph_cache;
-        let atlas = glyph_cache.atlas();
-
-        let rows = grid.height();
-        let cols = grid.width();
-        let cell_w = metrics.cell_size.width as f32;
-        let cell_h = metrics.cell_size.height as f32;
-
-        // Build vertex buffer from visible cells
-        let mut vertices: Vec<GlyphVertex> = Vec::new();
-
-        for y in 0..rows {
-            for x in 0..cols {
-                let cell = match grid.get(x, y) {
-                    Some(c) => c,
-                    None => continue,
-                };
-
-                if cell.is_blank() {
-                    continue;
-                }
-
-                // Look up glyph
-                let ch = cell.character;
-                let style = crate::font::FontStyle {
-                    weight: if cell.attributes.bold {
-                        fontdb::Weight::BOLD
-                    } else {
-                        fontdb::Weight::NORMAL
-                    },
-                    style: if cell.attributes.italic {
-                        fontdb::Style::Italic
-                    } else {
-                        fontdb::Style::Normal
-                    },
-                    stretch: fontdb::Stretch::Normal,
-                };
-                let size = crate::font::FontSize::new(metrics.font.line_height as u16);
-
-                let cached = match glyph_cache.get_glyph(ch, size, style) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
-                let rect = cached.rect;
-                let atlas_w = atlas.dimensions().0 as f32;
-                let atlas_h = atlas.dimensions().1 as f32;
-
-                let px = x as f32 * cell_w;
-                let py = y as f32 * cell_h;
-
-                // Normalized UV coordinates
-                let u0 = rect.x as f32 / atlas_w;
-                let v0 = rect.y as f32 / atlas_h;
-                let u1 = (rect.x + rect.width) as f32 / atlas_w;
-                let v1 = (rect.y + rect.height) as f32 / atlas_h;
-
-                // Foreground color
-                let color = resolve_color(cell.foreground, colors);
-
-                // Quad vertices (two triangles)
-                vertices.push(GlyphVertex::new([px, py], [u0, v0], color));
-                vertices.push(GlyphVertex::new([px + cell_w, py], [u1, v0], color));
-                vertices.push(GlyphVertex::new([px, py + cell_h], [u0, v1], color));
-
-                vertices.push(GlyphVertex::new([px + cell_w, py], [u1, v0], color));
-                vertices.push(GlyphVertex::new([px + cell_w, py + cell_h], [u1, v1], color));
-                vertices.push(GlyphVertex::new([px, py + cell_h], [u0, v1], color));
-            }
-        }
+        ctx.queue
+            .write_buffer(uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         // Begin render pass
         let mut frame = self.frame.lock();
@@ -720,80 +817,145 @@ impl RenderBackend for WgpuBackend {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create bind group with current atlas
-        let bind_group = self.create_bind_group(atlas.view(), atlas.sampler())?;
+        // Use cached bind group if atlas texture hasn't changed
+        let atlas_view_ptr = atlas.view() as *const _ as u64;
+        if self.cached_bind_group.is_none() || self.cached_atlas_view_id != atlas_view_ptr {
+            self.cached_bind_group = Some(self.create_bind_group(atlas.view(), atlas.sampler())?);
+            self.cached_atlas_view_id = atlas_view_ptr;
+        }
+        let bind_group = self.cached_bind_group.as_ref().unwrap();
 
-        // Background color from palette
         let bg = colors.default_bg.to_f32_array();
 
         {
             let mut render_pass =
-                resources.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Glyph Render Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: bg[0] as f64,
-                                g: bg[1] as f64,
-                                b: bg[2] as f64,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None,
-                    timestamp_writes: None,
+                resources
+                    .encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Glyph Render Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: bg[0] as f64,
+                                    g: bg[1] as f64,
+                                    b: bg[2] as f64,
+                                    a: 1.0,
+                                }),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    });
+
+            // ── Render selection background ──────────────────────────────
+            if !self.sel_vertices_buf.is_empty() {
+                let sel_size =
+                    (self.sel_vertices_buf.len() * std::mem::size_of::<GlyphVertex>()) as u64;
+                Self::ensure_buffer(
+                    &ctx.device,
+                    &mut self.persistent_sel_buffer,
+                    "Persistent Selection Vertices",
+                    sel_size,
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                );
+                ctx.queue.write_buffer(
+                    self.persistent_sel_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(&self.sel_vertices_buf),
+                );
+
+                let cursor_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Selection Bind Group"),
+                    layout: self.cursor_bind_group_layout.as_ref().unwrap(),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform_buffer.as_entire_binding(),
+                    }],
                 });
 
-            // Update cursor renderer position from terminal
-        let (cursor_col, cursor_row) = terminal.cursor().position();
-        context.cursor_renderer.set_position(cursor_col as u32, cursor_row as u32);
+                render_pass.set_pipeline(self.cursor_pipeline.as_ref().unwrap());
+                render_pass.set_bind_group(0, &cursor_bg, &[]);
+                render_pass
+                    .set_vertex_buffer(0, self.persistent_sel_buffer.as_ref().unwrap().slice(..));
+                render_pass.draw(0..self.sel_vertices_buf.len() as u32, 0..1);
+                draw_calls += 1;
+            }
 
-        // ── Render glyphs ────────────────────────────────────────────
-            if !vertices.is_empty() {
-                let vertex_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Frame Glyph Vertices"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+            // ── Render glyphs ────────────────────────────────────────────
+            if !self.glyph_vertices_buf.is_empty() {
+                let glyph_size =
+                    (self.glyph_vertices_buf.len() * std::mem::size_of::<GlyphVertex>()) as u64;
+                Self::ensure_buffer(
+                    &ctx.device,
+                    &mut self.persistent_glyph_buffer,
+                    "Persistent Glyph Vertices",
+                    glyph_size,
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                );
+                ctx.queue.write_buffer(
+                    self.persistent_glyph_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(&self.glyph_vertices_buf),
+                );
 
                 render_pass.set_pipeline(render_pipeline);
-                render_pass.set_bind_group(0, &bind_group, &[]);
-                render_pass.set_vertex_buffer(0, vertex_buf.slice(..));
-                render_pass.draw(0..vertices.len() as u32, 0..1);
+                render_pass.set_bind_group(0, bind_group, &[]);
+                render_pass
+                    .set_vertex_buffer(0, self.persistent_glyph_buffer.as_ref().unwrap().slice(..));
+                render_pass.draw(0..self.glyph_vertices_buf.len() as u32, 0..1);
+                draw_calls += 1;
             }
 
             // ── Render cursor (solid color overlay) ──────────────────────
             if context.cursor_renderer.should_render() {
-                let cursor_vertices = context.cursor_renderer.get_vertices();
-                if !cursor_vertices.is_empty() {
+                self.cursor_vertices_buf.clear();
+                context
+                    .cursor_renderer
+                    .fill_vertices_into(&mut self.cursor_vertices_buf);
+                if !self.cursor_vertices_buf.is_empty() {
                     let cursor_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("Cursor Bind Group"),
                         layout: self.cursor_bind_group_layout.as_ref().unwrap(),
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: uniform_buffer.as_entire_binding(),
-                            },
-                        ],
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniform_buffer.as_entire_binding(),
+                        }],
                     });
 
-                    let cursor_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Frame Cursor Vertices"),
-                        contents: bytemuck::cast_slice(&cursor_vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+                    let cursor_size = (self.cursor_vertices_buf.len()
+                        * std::mem::size_of::<crate::cursor::CursorVertex>())
+                        as u64;
+                    Self::ensure_buffer(
+                        &ctx.device,
+                        &mut self.persistent_cursor_buffer,
+                        "Persistent Cursor Vertices",
+                        cursor_size,
+                        wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    );
+                    ctx.queue.write_buffer(
+                        self.persistent_cursor_buffer.as_ref().unwrap(),
+                        0,
+                        bytemuck::cast_slice(&self.cursor_vertices_buf),
+                    );
 
                     render_pass.set_pipeline(self.cursor_pipeline.as_ref().unwrap());
                     render_pass.set_bind_group(0, &cursor_bg, &[]);
-                    render_pass.set_vertex_buffer(0, cursor_buf.slice(..));
-                    render_pass.draw(0..cursor_vertices.len() as u32, 0..1);
+                    render_pass.set_vertex_buffer(
+                        0,
+                        self.persistent_cursor_buffer.as_ref().unwrap().slice(..),
+                    );
+                    render_pass.draw(0..self.cursor_vertices_buf.len() as u32, 0..1);
+                    draw_calls += 1;
                 }
             }
         }
+
+        // Write draw calls back to diagnostics
+        context.diagnostics.draw_calls = draw_calls;
 
         Ok(())
     }
@@ -820,7 +982,11 @@ impl RenderBackend for WgpuBackend {
 
         let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Glyph Atlas"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -831,7 +997,12 @@ impl RenderBackend for WgpuBackend {
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let handle = TextureHandle { texture, view, width, height };
+        let handle = TextureHandle {
+            texture,
+            _view: view,
+            _width: width,
+            _height: height,
+        };
         self.textures.lock().insert(id, handle);
 
         Ok(AtlasTexture { id, width, height })
@@ -863,7 +1034,11 @@ impl RenderBackend for WgpuBackend {
                     bytes_per_row: Some(width),
                     rows_per_image: Some(height),
                 },
-                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
             );
             Ok(())
         } else {
@@ -875,11 +1050,13 @@ impl RenderBackend for WgpuBackend {
         let ctx = self.ctx()?;
         let id = self.next_id();
 
-        let buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: data,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
+        let buffer = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Vertex Buffer"),
+                contents: data,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
 
         let handle = BufferHandle {
             buffer,
@@ -888,18 +1065,23 @@ impl RenderBackend for WgpuBackend {
         };
         self.buffers.lock().insert(id, handle);
 
-        Ok(VertexBuffer { id, size: data.len() })
+        Ok(VertexBuffer {
+            id,
+            size: data.len(),
+        })
     }
 
     fn create_index_buffer(&mut self, data: &[u8]) -> RendererResult<IndexBuffer> {
         let ctx = self.ctx()?;
         let id = self.next_id();
 
-        let buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: data,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-        });
+        let buffer = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Index Buffer"),
+                contents: data,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            });
 
         let count = (data.len() / 2) as u32;
         let handle = BufferHandle {
@@ -916,11 +1098,13 @@ impl RenderBackend for WgpuBackend {
         let ctx = self.ctx()?;
         let id = self.next_id();
 
-        let buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Uniform Buffer"),
-            contents: data,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let buffer = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Uniform Buffer"),
+                contents: data,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
 
         let handle = BufferHandle {
             buffer,
@@ -929,7 +1113,10 @@ impl RenderBackend for WgpuBackend {
         };
         self.buffers.lock().insert(id, handle);
 
-        Ok(UniformBuffer { id, size: data.len() })
+        Ok(UniformBuffer {
+            id,
+            size: data.len(),
+        })
     }
 
     fn update_buffer(&mut self, buffer: &mut dyn Buffer, data: &[u8]) -> RendererResult<()> {
@@ -962,8 +1149,106 @@ impl RenderBackend for WgpuBackend {
     }
 }
 
+/// Builds vertex data for selection backgrounds and glyph quads.
+/// Reuses the provided vectors to avoid per-frame allocations.
+#[allow(clippy::too_many_arguments)]
+fn build_vertex_data(
+    rows: &[Row],
+    terminal: &Terminal,
+    cols: usize,
+    cell_w: f32,
+    cell_h: f32,
+    line_height: f32,
+    sel_bg: [f32; 4],
+    has_selection: bool,
+    glyph_cache: &GlyphCache,
+    atlas: &GlyphAtlas,
+    colors: &ColorPalette,
+    sel_vertices: &mut Vec<GlyphVertex>,
+    glyph_vertices: &mut Vec<GlyphVertex>,
+) -> RendererResult<()> {
+    let resolve_color = |color: comet_core::Color| -> [f32; 4] { resolve_color(color, colors) };
+
+    for (vis_row, row) in rows.iter().enumerate() {
+        let abs_row = terminal.visible_row_to_absolute(vis_row);
+
+        for col in 0..cols {
+            let cell = match row.cells.get(col) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let px = col as f32 * cell_w;
+            let py = vis_row as f32 * cell_h;
+
+            // Selection background
+            if has_selection && terminal.selection().contains(col, abs_row) {
+                sel_vertices.push(GlyphVertex::new([px, py], [0.0, 0.0], sel_bg));
+                sel_vertices.push(GlyphVertex::new([px + cell_w, py], [0.0, 0.0], sel_bg));
+                sel_vertices.push(GlyphVertex::new([px, py + cell_h], [0.0, 0.0], sel_bg));
+                sel_vertices.push(GlyphVertex::new([px + cell_w, py], [0.0, 0.0], sel_bg));
+                sel_vertices.push(GlyphVertex::new(
+                    [px + cell_w, py + cell_h],
+                    [0.0, 0.0],
+                    sel_bg,
+                ));
+                sel_vertices.push(GlyphVertex::new([px, py + cell_h], [0.0, 0.0], sel_bg));
+            }
+
+            // Glyph
+            if cell.is_blank() {
+                continue;
+            }
+
+            let ch = cell.character;
+            let style = crate::font::FontStyle {
+                weight: if cell.attributes.bold {
+                    fontdb::Weight::BOLD
+                } else {
+                    fontdb::Weight::NORMAL
+                },
+                style: if cell.attributes.italic {
+                    fontdb::Style::Italic
+                } else {
+                    fontdb::Style::Normal
+                },
+                stretch: fontdb::Stretch::Normal,
+            };
+            let size = crate::font::FontSize::new(line_height as u16);
+
+            let cached = match glyph_cache.get_glyph(ch, size, style) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let rect = cached.rect;
+            let atlas_w = atlas.dimensions().0 as f32;
+            let atlas_h = atlas.dimensions().1 as f32;
+
+            let u0 = rect.x as f32 / atlas_w;
+            let v0 = rect.y as f32 / atlas_h;
+            let u1 = (rect.x + rect.width) as f32 / atlas_w;
+            let v1 = (rect.y + rect.height) as f32 / atlas_h;
+
+            let color = resolve_color(cell.foreground);
+
+            glyph_vertices.push(GlyphVertex::new([px, py], [u0, v0], color));
+            glyph_vertices.push(GlyphVertex::new([px + cell_w, py], [u1, v0], color));
+            glyph_vertices.push(GlyphVertex::new([px, py + cell_h], [u0, v1], color));
+            glyph_vertices.push(GlyphVertex::new([px + cell_w, py], [u1, v0], color));
+            glyph_vertices.push(GlyphVertex::new(
+                [px + cell_w, py + cell_h],
+                [u1, v1],
+                color,
+            ));
+            glyph_vertices.push(GlyphVertex::new([px, py + cell_h], [u0, v1], color));
+        }
+    }
+    Ok(())
+}
+
 /// Resolves a `comet_core::Color` to an RGBA float array using the palette.
-fn resolve_color(color: comet_core::Color, palette: &crate::ColorPalette) -> [f32; 4] {
+fn resolve_color(color: comet_core::Color, palette: &ColorPalette) -> [f32; 4] {
     match color {
         comet_core::Color::Default => palette.default_fg.to_f32_array(),
         comet_core::Color::Black => palette.ansi[0].to_f32_array(),
@@ -986,6 +1271,8 @@ fn resolve_color(color: comet_core::Color, palette: &crate::ColorPalette) -> [f3
             let rgba = palette.get(idx);
             rgba.to_f32_array()
         }
-        comet_core::Color::Rgb(r, g, b) => [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0],
+        comet_core::Color::Rgb(r, g, b) => {
+            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
+        }
     }
 }

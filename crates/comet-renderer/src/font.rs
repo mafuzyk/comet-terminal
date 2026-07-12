@@ -8,15 +8,21 @@
 
 use crate::error::{RendererError, RendererResult};
 use cosmic_text::{
-    FontSystem as CosmicFontSystem, Buffer, Metrics, Attrs, AttrsList, 
-    Family as CosmicFamily, Weight as CosmicWeight, Style as CosmicStyle, Stretch as CosmicStretch, Color, Shaping, Wrap,
+    Attrs, Color, Family as CosmicFamily, FontSystem as CosmicFontSystem, Metrics, Shaping,
+    Stretch as CosmicStretch, Style as CosmicStyle, Weight as CosmicWeight,
 };
-use fontdb::{Database, Family as FontdbFamily, ID, Query, Stretch as FontdbStretch, Weight as FontdbWeight, Style as FontdbStyle, Source as FontdbSource};
+use fontdb::{
+    Family as FontdbFamily, Query, Stretch as FontdbStretch, Style as FontdbStyle,
+    Weight as FontdbWeight,
+};
 use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use swash::{GlyphId, FontRef, CacheKey, scale::{ScaleContext, Source as SwashSource, Scaler, Render, StrikeWith}, scale::image::Image, zeno::Format};
+use swash::{
+    FontRef, GlyphId,
+    scale::{Render, ScaleContext, Source as SwashSource, StrikeWith},
+};
 
 /// Font size in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,21 +52,27 @@ impl FontStyle {
     }
 
     pub fn bold() -> Self {
-        Self { weight: FontdbWeight::BOLD, ..Self::default() }
+        Self {
+            weight: FontdbWeight::BOLD,
+            ..Self::default()
+        }
     }
 
     pub fn italic() -> Self {
-        Self { style: FontdbStyle::Italic, ..Self::default() }
+        Self {
+            style: FontdbStyle::Italic,
+            ..Self::default()
+        }
     }
 
     pub fn is_bold(&self) -> bool {
         self.weight == FontdbWeight::BOLD
     }
-    
+
     pub fn is_italic(&self) -> bool {
         self.style == FontdbStyle::Italic
     }
-    
+
     /// Convert to cosmic_text weight
     pub fn to_cosmic_weight(&self) -> CosmicWeight {
         match self.weight {
@@ -76,7 +88,7 @@ impl FontStyle {
             _ => CosmicWeight::NORMAL,
         }
     }
-    
+
     /// Convert to cosmic_text style
     pub fn to_cosmic_style(&self) -> CosmicStyle {
         match self.style {
@@ -125,7 +137,7 @@ pub struct GlyphMetrics {
 pub struct RasterizedGlyph {
     pub width: u32,
     pub height: u32,
-    pub bitmap: Vec<u8>,  // Alpha channel only (1 byte per pixel)
+    pub bitmap: Vec<u8>, // Alpha channel only (1 byte per pixel)
     pub advance_width: f32,
     pub left_bearing: f32,
     pub top_bearing: f32,
@@ -217,7 +229,7 @@ impl FontSystem {
     /// Ensures a font is loaded and returns its internal ID.
     fn ensure_font_loaded(&self, family: &str, size: u16, style: FontStyle) -> RendererResult<u64> {
         let key = (family.to_string(), size, style);
-        
+
         // Check cache
         if let Some(id) = self.loaded_fonts.read().get(&key) {
             return Ok(*id);
@@ -272,7 +284,7 @@ impl FontSystem {
     }
 
     /// Creates a cosmic-text buffer for layout operations.
-    pub fn create_buffer(&self, width: f32, height: f32) -> cosmic_text::Buffer {
+    pub fn create_buffer(&self, _width: f32, _height: f32) -> cosmic_text::Buffer {
         let mut cosmic = self.cosmic.write();
         cosmic_text::Buffer::new(&mut cosmic, Metrics::new(14.0, 18.0))
     }
@@ -287,13 +299,16 @@ impl FontSystem {
         color: Color,
     ) -> RendererResult<Vec<PositionedGlyph>> {
         let mut cosmic = self.cosmic.write();
-        
+
         // Ensure font is loaded
         self.ensure_font_loaded(family, size.0, style)?;
 
-        let mut buffer = cosmic_text::Buffer::new(&mut cosmic, Metrics::new(size.as_f32(), size.as_f32() * 1.2));
-        
-let attrs = Attrs::new()
+        let mut buffer = cosmic_text::Buffer::new(
+            &mut cosmic,
+            Metrics::new(size.as_f32(), size.as_f32() * 1.2),
+        );
+
+        let attrs = Attrs::new()
             .family(CosmicFamily::Name(family))
             .weight(style.to_cosmic_weight())
             .style(style.to_cosmic_style())
@@ -328,8 +343,11 @@ let attrs = Attrs::new()
         ch: char,
     ) -> RendererResult<GlyphMetrics> {
         let mut cosmic = self.cosmic.write();
-        let mut buffer = cosmic_text::Buffer::new(&mut cosmic, Metrics::new(size.as_f32(), size.as_f32() * 1.2));
-        
+        let mut buffer = cosmic_text::Buffer::new(
+            &mut cosmic,
+            Metrics::new(size.as_f32(), size.as_f32() * 1.2),
+        );
+
         let attrs = Attrs::new()
             .family(CosmicFamily::Name(family))
             .weight(style.to_cosmic_weight())
@@ -368,34 +386,44 @@ let attrs = Attrs::new()
             stretch: style.stretch,
             style: style.style,
         };
-        
-        let font_id = self.db.query(&query)
+
+        let font_id = self
+            .db
+            .query(&query)
             .ok_or_else(|| RendererError::font(format!("Font not found: {}", family)))?;
-        
-        let face = self.db.face(font_id)
+
+        let _face = self
+            .db
+            .face(font_id)
             .ok_or_else(|| RendererError::font(format!("Font face not found: {}", family)))?;
-        
+
         // Get font data using with_face_data
-        let (font_data, face_index) = self.db.with_face_data(font_id, |data, index| (data.to_vec(), index))
+        let (font_data, face_index) = self
+            .db
+            .with_face_data(font_id, |data, index| (data.to_vec(), index))
             .ok_or_else(|| RendererError::font("Failed to load font data"))?;
-        
+
         let font_ref = FontRef::from_offset(&font_data, face_index)
             .ok_or_else(|| RendererError::font("Failed to create FontRef"))?;
-        
+
         // Get glyph ID
         let glyph_id = font_ref.charmap().map(ch);
         if glyph_id == 0 && ch != '\0' {
-            return Err(RendererError::font(format!("Glyph not found for character: {}", ch)));
+            return Err(RendererError::font(format!(
+                "Glyph not found for character: {}",
+                ch
+            )));
         }
-        
+
         // Create scaler and render
-        let scale = size.as_f32();
+        let _scale = size.as_f32();
         let mut swash_context = self.swash_context.borrow_mut();
-        let mut scaler = swash_context.builder(font_ref)
+        let mut scaler = swash_context
+            .builder(font_ref)
             .size(size.as_f32())
             .hint(true)
             .build();
-        
+
         // Render the glyph
         let image = Render::new(&[
             SwashSource::ColorOutline(0),
@@ -405,20 +433,20 @@ let attrs = Attrs::new()
         .format(swash::zeno::Format::Alpha)
         .render(&mut scaler, glyph_id)
         .ok_or_else(|| RendererError::font("Failed to render glyph"))?;
-        
+
         let placement = image.placement;
         let width = placement.width;
         let height = placement.height;
-        
+
         if width == 0 || height == 0 {
             return Ok(RasterizedGlyph::empty());
         }
-        
+
         let bitmap = image.data;
-        
+
         // Get advance width - use placement width as approximation
         let advance_width = placement.width as f32;
-        
+
         Ok(RasterizedGlyph {
             width,
             height,
@@ -432,10 +460,18 @@ let attrs = Attrs::new()
     }
 
     /// Gets font metrics for the given font configuration.
-    pub fn font_metrics(&self, family: &str, size: FontSize, style: FontStyle) -> Result<FontMetrics, RendererError> {
+    pub fn font_metrics(
+        &self,
+        family: &str,
+        size: FontSize,
+        style: FontStyle,
+    ) -> Result<FontMetrics, RendererError> {
         let mut cosmic = self.cosmic.write();
-        let mut buffer = cosmic_text::Buffer::new(&mut cosmic, Metrics::new(size.as_f32(), size.as_f32() * 1.2));
-        
+        let mut buffer = cosmic_text::Buffer::new(
+            &mut cosmic,
+            Metrics::new(size.as_f32(), size.as_f32() * 1.2),
+        );
+
         let attrs = Attrs::new()
             .family(CosmicFamily::Name(family))
             .weight(style.to_cosmic_weight())
@@ -445,7 +481,7 @@ let attrs = Attrs::new()
         buffer.set_text(&mut cosmic, "x", attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut cosmic);
 
-        if let Some(run) = buffer.layout_runs().next() {
+        if let Some(_run) = buffer.layout_runs().next() {
             Ok(FontMetrics {
                 line_height: size.as_f32() * 1.2,
                 ascent: size.as_f32(),
@@ -470,13 +506,13 @@ pub struct PositionedGlyph {
 
 /// High-level glyph renderer using swash for rasterization.
 pub struct GlyphRenderer {
-    swash_context: ScaleContext,
+    _swash_context: ScaleContext,
 }
 
 impl GlyphRenderer {
     pub fn new() -> Self {
         Self {
-            swash_context: ScaleContext::new(),
+            _swash_context: ScaleContext::new(),
         }
     }
 
@@ -496,7 +532,12 @@ impl GlyphRenderer {
     }
 
     /// Gets glyph metrics from swash.
-    pub fn metrics(&self, _font_data: &[u8], _glyph_id: GlyphId, _size: FontSize) -> Result<GlyphMetrics, RendererError> {
+    pub fn metrics(
+        &self,
+        _font_data: &[u8],
+        _glyph_id: GlyphId,
+        _size: FontSize,
+    ) -> Result<GlyphMetrics, RendererError> {
         Err(RendererError::font("Metrics not yet implemented"))
     }
 }

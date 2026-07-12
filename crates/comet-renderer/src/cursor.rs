@@ -60,11 +60,7 @@ pub struct CursorRenderer {
 
 impl CursorRenderer {
     /// Creates a new cursor renderer.
-    pub fn new(
-        damage_tracker: Arc<DamageTracker>,
-        cell_width: f32,
-        cell_height: f32,
-    ) -> Self {
+    pub fn new(damage_tracker: Arc<DamageTracker>, cell_width: f32, cell_height: f32) -> Self {
         Self {
             config: RwLock::new(CursorConfig::default()),
             state: RwLock::new(BlinkState::On),
@@ -134,10 +130,16 @@ impl CursorRenderer {
     }
 
     /// Updates blink state based on elapsed time.
+    /// Marks the cursor cell as damaged if blink state toggles.
     pub fn update_blink(&self) {
         let config = self.config.read();
         if !config.blink {
-            *self.state.write() = BlinkState::On;
+            let mut state = self.state.write();
+            if *state != BlinkState::On {
+                *state = BlinkState::On;
+                let (col, row) = *self.position.read();
+                self.damage_tracker.add_cell(col, row);
+            }
             return;
         }
 
@@ -145,10 +147,28 @@ impl CursorRenderer {
         if elapsed >= config.blink_interval {
             *self.last_blink.write() = Instant::now();
             let mut state = self.state.write();
-            *state = match *state {
+            let new = match *state {
                 BlinkState::On => BlinkState::Off,
                 BlinkState::Off => BlinkState::On,
             };
+            if new != *state {
+                *state = new;
+                let (col, row) = *self.position.read();
+                self.damage_tracker.add_cell(col, row);
+            }
+        }
+    }
+
+    /// Records user activity (key press, mouse click).
+    /// Resets the blink timer and forces the cursor visible,
+    /// suspending blink for a brief period.
+    pub fn activity(&self) {
+        *self.last_blink.write() = Instant::now();
+        let mut state = self.state.write();
+        if *state != BlinkState::On {
+            *state = BlinkState::On;
+            let (col, row) = *self.position.read();
+            self.damage_tracker.add_cell(col, row);
         }
     }
 
@@ -163,10 +183,30 @@ impl CursorRenderer {
         let (cell_w, cell_h) = *self.cell_size.read();
         let config = self.config.read();
 
+        let mut vertices = Vec::with_capacity(24);
+        self.fill_cursor_vertices(&mut vertices, col, row, cell_w, cell_h, &config);
+        vertices
+    }
+
+    /// Writes cursor vertices into a pre-allocated buffer to avoid per-frame allocations.
+    pub fn fill_vertices_into(&self, vertices: &mut Vec<CursorVertex>) {
+        let (col, row) = *self.position.read();
+        let (cell_w, cell_h) = *self.cell_size.read();
+        let config = self.config.read();
+        self.fill_cursor_vertices(vertices, col, row, cell_w, cell_h, &config);
+    }
+
+    fn fill_cursor_vertices(
+        &self,
+        vertices: &mut Vec<CursorVertex>,
+        col: u32,
+        row: u32,
+        cell_w: f32,
+        cell_h: f32,
+        config: &CursorConfig,
+    ) {
         let x = col as f32 * cell_w;
         let y = row as f32 * cell_h;
-
-        let mut vertices = Vec::with_capacity(24);
 
         match config.shape {
             CursorShape::Block => {
@@ -174,7 +214,11 @@ impl CursorRenderer {
                 vertices.push(CursorVertex::new([x + cell_w, y], [1.0, 0.0], config.color));
                 vertices.push(CursorVertex::new([x, y + cell_h], [0.0, 1.0], config.color));
                 vertices.push(CursorVertex::new([x + cell_w, y], [1.0, 0.0], config.color));
-                vertices.push(CursorVertex::new([x + cell_w, y + cell_h], [1.0, 1.0], config.color));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w, y + cell_h],
+                    [1.0, 1.0],
+                    config.color,
+                ));
                 vertices.push(CursorVertex::new([x, y + cell_h], [0.0, 1.0], config.color));
             }
             CursorShape::Beam => {
@@ -183,16 +227,36 @@ impl CursorRenderer {
                 vertices.push(CursorVertex::new([x + beam_w, y], [1.0, 0.0], config.color));
                 vertices.push(CursorVertex::new([x, y + cell_h], [0.0, 1.0], config.color));
                 vertices.push(CursorVertex::new([x + beam_w, y], [1.0, 0.0], config.color));
-                vertices.push(CursorVertex::new([x + beam_w, y + cell_h], [1.0, 1.0], config.color));
+                vertices.push(CursorVertex::new(
+                    [x + beam_w, y + cell_h],
+                    [1.0, 1.0],
+                    config.color,
+                ));
                 vertices.push(CursorVertex::new([x, y + cell_h], [0.0, 1.0], config.color));
             }
             CursorShape::Underline => {
                 let line_h = 2.0;
-                vertices.push(CursorVertex::new([x, y + cell_h - line_h], [0.0, 0.0], config.color));
-                vertices.push(CursorVertex::new([x + cell_w, y + cell_h - line_h], [1.0, 0.0], config.color));
+                vertices.push(CursorVertex::new(
+                    [x, y + cell_h - line_h],
+                    [0.0, 0.0],
+                    config.color,
+                ));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w, y + cell_h - line_h],
+                    [1.0, 0.0],
+                    config.color,
+                ));
                 vertices.push(CursorVertex::new([x, y + cell_h], [0.0, 1.0], config.color));
-                vertices.push(CursorVertex::new([x + cell_w, y + cell_h - line_h], [1.0, 0.0], config.color));
-                vertices.push(CursorVertex::new([x + cell_w, y + cell_h], [1.0, 1.0], config.color));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w, y + cell_h - line_h],
+                    [1.0, 0.0],
+                    config.color,
+                ));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w, y + cell_h],
+                    [1.0, 1.0],
+                    config.color,
+                ));
                 vertices.push(CursorVertex::new([x, y + cell_h], [0.0, 1.0], config.color));
             }
             CursorShape::HollowBlock => {
@@ -207,9 +271,17 @@ impl CursorRenderer {
                 vertices.push(CursorVertex::new([x, y + border], [0.0, 1.0], c));
                 // Bottom
                 vertices.push(CursorVertex::new([x, y + cell_h - border], [0.0, 0.0], c));
-                vertices.push(CursorVertex::new([x + cell_w, y + cell_h - border], [1.0, 0.0], c));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w, y + cell_h - border],
+                    [1.0, 0.0],
+                    c,
+                ));
                 vertices.push(CursorVertex::new([x, y + cell_h], [0.0, 1.0], c));
-                vertices.push(CursorVertex::new([x + cell_w, y + cell_h - border], [1.0, 0.0], c));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w, y + cell_h - border],
+                    [1.0, 0.0],
+                    c,
+                ));
                 vertices.push(CursorVertex::new([x + cell_w, y + cell_h], [1.0, 1.0], c));
                 vertices.push(CursorVertex::new([x, y + cell_h], [0.0, 1.0], c));
                 // Left
@@ -217,15 +289,35 @@ impl CursorRenderer {
                 vertices.push(CursorVertex::new([x + border, y + border], [1.0, 0.0], c));
                 vertices.push(CursorVertex::new([x, y + cell_h - border], [0.0, 1.0], c));
                 vertices.push(CursorVertex::new([x + border, y + border], [1.0, 0.0], c));
-                vertices.push(CursorVertex::new([x + border, y + cell_h - border], [1.0, 1.0], c));
+                vertices.push(CursorVertex::new(
+                    [x + border, y + cell_h - border],
+                    [1.0, 1.0],
+                    c,
+                ));
                 vertices.push(CursorVertex::new([x, y + cell_h - border], [0.0, 1.0], c));
                 // Right
-                vertices.push(CursorVertex::new([x + cell_w - border, y + border], [0.0, 0.0], c));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w - border, y + border],
+                    [0.0, 0.0],
+                    c,
+                ));
                 vertices.push(CursorVertex::new([x + cell_w, y + border], [1.0, 0.0], c));
-                vertices.push(CursorVertex::new([x + cell_w - border, y + cell_h - border], [0.0, 1.0], c));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w - border, y + cell_h - border],
+                    [0.0, 1.0],
+                    c,
+                ));
                 vertices.push(CursorVertex::new([x + cell_w, y + border], [1.0, 0.0], c));
-                vertices.push(CursorVertex::new([x + cell_w, y + cell_h - border], [1.0, 1.0], c));
-                vertices.push(CursorVertex::new([x + cell_w - border, y + cell_h - border], [0.0, 1.0], c));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w, y + cell_h - border],
+                    [1.0, 1.0],
+                    c,
+                ));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w - border, y + cell_h - border],
+                    [0.0, 1.0],
+                    c,
+                ));
             }
             CursorShape::Bar => {
                 let bar_h = cell_h / 4.0;
@@ -233,12 +325,14 @@ impl CursorRenderer {
                 vertices.push(CursorVertex::new([x + cell_w, y], [1.0, 0.0], config.color));
                 vertices.push(CursorVertex::new([x, y + bar_h], [0.0, 1.0], config.color));
                 vertices.push(CursorVertex::new([x + cell_w, y], [1.0, 0.0], config.color));
-                vertices.push(CursorVertex::new([x + cell_w, y + bar_h], [1.0, 1.0], config.color));
+                vertices.push(CursorVertex::new(
+                    [x + cell_w, y + bar_h],
+                    [1.0, 1.0],
+                    config.color,
+                ));
                 vertices.push(CursorVertex::new([x, y + bar_h], [0.0, 1.0], config.color));
             }
         }
-
-        vertices
     }
 }
 
@@ -253,7 +347,11 @@ pub struct CursorVertex {
 
 impl CursorVertex {
     pub fn new(position: [f32; 2], tex_coord: [f32; 2], color: [f32; 4]) -> Self {
-        Self { position, tex_coord, color }
+        Self {
+            position,
+            tex_coord,
+            color,
+        }
     }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -285,6 +383,7 @@ impl CursorVertex {
 mod tests {
     use super::*;
     use crate::damage::DamageTracker;
+    use std::sync::Arc;
 
     #[test]
     fn test_cursor_shape() {
@@ -296,5 +395,107 @@ mod tests {
         let config = CursorConfig::default();
         assert!(config.blink);
         assert_eq!(config.blink_interval.as_millis(), 500);
+    }
+
+    #[test]
+    fn test_cursor_position_damage() {
+        let dt = Arc::new(DamageTracker::new(80, 24));
+        let cursor = CursorRenderer::new(dt.clone(), 10.0, 20.0);
+
+        // Default position is (0,0), so first set_position will mark damage
+        cursor.set_position(5, 10);
+        let _initial = dt.take_damage();
+        assert!(dt.is_empty()); // No change from previous position
+
+        // Change position — should mark old and new as damaged
+        cursor.set_position(8, 11);
+        let damage = dt.take_damage();
+        assert_eq!(damage.len(), 2);
+    }
+
+    #[test]
+    fn test_cursor_visibility_damage() {
+        let dt = Arc::new(DamageTracker::new(80, 24));
+        let cursor = CursorRenderer::new(dt.clone(), 10.0, 20.0);
+
+        cursor.set_position(5, 10);
+        dt.clear();
+
+        // Toggle visibility — should mark cursor cell as damaged
+        cursor.set_visible(false);
+        let damage = dt.take_damage();
+        assert_eq!(damage.len(), 1);
+        assert_eq!(damage[0].x, 5);
+        assert_eq!(damage[0].y, 10);
+    }
+
+    #[test]
+    fn test_cursor_blink_damage() {
+        let dt = Arc::new(DamageTracker::new(80, 24));
+        let cursor = CursorRenderer::new(dt.clone(), 10.0, 20.0);
+        cursor.set_position(5, 10);
+        cursor.set_blink(true);
+        dt.clear();
+
+        // Should not damage on first call (blink interval not elapsed)
+        cursor.update_blink();
+        assert!(dt.is_empty());
+    }
+
+    #[test]
+    fn test_cursor_activity_resets_blink() {
+        let dt = Arc::new(DamageTracker::new(80, 24));
+        let cursor = CursorRenderer::new(dt.clone(), 10.0, 20.0);
+        cursor.set_position(5, 10);
+        cursor.set_blink(true);
+
+        // After activity, cursor should be visible (blink state = On)
+        cursor.activity();
+        assert!(cursor.should_render());
+    }
+
+    #[test]
+    fn test_cursor_shape_change_damage() {
+        let dt = Arc::new(DamageTracker::new(80, 24));
+        let cursor = CursorRenderer::new(dt.clone(), 10.0, 20.0);
+        cursor.set_position(5, 10);
+        dt.clear();
+
+        // Change shape — should mark cursor as damaged
+        cursor.set_shape(CursorShape::Underline);
+        let damage = dt.take_damage();
+        assert_eq!(damage.len(), 1);
+        assert_eq!(damage[0].x, 5);
+    }
+
+    #[test]
+    fn test_cursor_vertex_count() {
+        let dt = Arc::new(DamageTracker::new(80, 24));
+        let cursor = CursorRenderer::new(dt.clone(), 10.0, 20.0);
+        cursor.set_position(0, 0);
+
+        // Block cursor: 6 vertices (two triangles)
+        let vertices = cursor.get_vertices();
+        assert_eq!(vertices.len(), 6);
+
+        // Change to Beam shape: also 6 vertices
+        cursor.set_shape(CursorShape::Beam);
+        let vertices = cursor.get_vertices();
+        assert_eq!(vertices.len(), 6);
+    }
+
+    #[test]
+    fn test_cursor_vertices_into_reusable_buffer() {
+        let dt = Arc::new(DamageTracker::new(80, 24));
+        let cursor = CursorRenderer::new(dt.clone(), 10.0, 20.0);
+        cursor.set_position(0, 0);
+
+        let mut buf = Vec::with_capacity(24);
+        cursor.fill_vertices_into(&mut buf);
+        assert_eq!(buf.len(), 6);
+
+        // Second call appends (caller is responsible for clearing)
+        cursor.fill_vertices_into(&mut buf);
+        assert_eq!(buf.len(), 12);
     }
 }

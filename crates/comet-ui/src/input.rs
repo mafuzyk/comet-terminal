@@ -50,14 +50,14 @@ pub fn key_event_to_ansi(event: &KeyEvent, ctrl: bool, alt: bool) -> Option<Vec<
     }
 
     // Use logical text when available (handles Shift, CapsLock, IME)
-    if let Some(text) = &event.text {
-        if !text.is_empty() {
-            let mut bytes = text.as_bytes().to_vec();
-            if alt {
-                bytes.insert(0, 0x1b); // Alt prefix
-            }
-            return Some(bytes);
+    if let Some(text) = &event.text
+        && !text.is_empty()
+    {
+        let mut bytes = text.as_bytes().to_vec();
+        if alt {
+            bytes.insert(0, 0x1b); // Alt prefix
         }
+        return Some(bytes);
     }
 
     // Special keys

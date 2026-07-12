@@ -3,8 +3,6 @@
 //! This module handles cell size calculations, DPI scaling,
 //! and font metrics for proper layout.
 
-use crate::error::{RendererError, RendererResult};
-
 /// Font metrics from a loaded font.
 #[derive(Debug, Clone, Copy)]
 pub struct FontMetrics {
@@ -47,7 +45,10 @@ pub struct CellSize {
 
 impl CellSize {
     pub fn new(width: u32, height: u32) -> Self {
-        Self { width: width.max(1), height: height.max(1) }
+        Self {
+            width: width.max(1),
+            height: height.max(1),
+        }
     }
 
     pub fn as_f32(&self) -> (f32, f32) {

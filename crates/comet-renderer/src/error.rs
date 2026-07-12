@@ -1,6 +1,5 @@
 //! Error types for the renderer.
 
-use std::fmt;
 use thiserror::Error;
 
 /// Result type for renderer operations.

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use comet_config::{load_config, ensure_default_themes};
+use comet_config::{Session, ensure_default_themes, load_config, load_session, save_session};
 use comet_ui::TerminalApp;
 use winit::{
     application::ApplicationHandler,
@@ -8,6 +8,8 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop},
     window::WindowAttributes,
 };
+
+mod icon;
 
 struct CometApp {
     app: Option<TerminalApp>,
@@ -24,16 +26,28 @@ impl ApplicationHandler for CometApp {
                 eprintln!("Failed to load config: {}", e);
                 comet_config::Config::default()
             });
+            let session = load_session();
+            let window_size = winit::dpi::LogicalSize::new(
+                session.window_width as f64,
+                session.window_height as f64,
+            );
             let window = Arc::new(
                 event_loop
                     .create_window(
                         WindowAttributes::default()
                             .with_title("Comet Terminal")
-                            .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
+                            .with_window_icon(icon::load_app_icon())
+                            .with_inner_size(window_size),
                     )
                     .expect("Failed to create window"),
             );
-            let terminal_app = TerminalApp::new(window, config);
+
+            // Restore window position if saved
+            if let (Some(x), Some(y)) = (session.window_x, session.window_y) {
+                let _ = window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
+            }
+
+            let terminal_app = TerminalApp::new(window, config, session);
             self.app = Some(terminal_app);
         }
     }
@@ -68,6 +82,21 @@ impl ApplicationHandler for CometApp {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Save session before exiting
+        if let Some(app) = &self.app {
+            let size = app.window().inner_size();
+            let pos = app.window().outer_position().ok();
+            let session = Session {
+                window_width: size.width,
+                window_height: size.height,
+                window_x: pos.map(|p| p.x),
+                window_y: pos.map(|p| p.y),
+                font_family: app.config().font.family.clone(),
+                font_size: app.config().font.size,
+                theme: app.config().theme.name.clone(),
+            };
+            save_session(&session);
+        }
         // Drop the TerminalApp — its Drop impl handles PTY kill, thread
         // join, and child reaping.
         self.app.take();

@@ -2,8 +2,6 @@
 //!
 //! Supports ANSI 16 colors, 256 colors, and true color (24-bit).
 
-use crate::error::{RendererError, RendererResult};
-
 /// RGBA color with 8 bits per channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Rgba {
@@ -185,7 +183,7 @@ impl ColorPalette {
         let default_fg = parse_hex_color(foreground).unwrap_or(Rgba::rgb(0xE5, 0xE5, 0xE5));
         let cursor_color = parse_hex_color(cursor).unwrap_or(Rgba::rgb(0xFF, 0xFF, 0xFF));
         let selection_bg = parse_hex_color(selection).unwrap_or(Rgba::rgb(0x4A, 0x4A, 0x4A));
-        
+
         ColorPalette {
             ansi: ANSI_COLORS,
             default_fg,
@@ -219,7 +217,7 @@ pub fn palette_from_hex(
     let default_fg = parse_hex_color(foreground).unwrap_or(Rgba::rgb(0xE5, 0xE5, 0xE5));
     let cursor_color = parse_hex_color(cursor).unwrap_or(Rgba::rgb(0xFF, 0xFF, 0xFF));
     let selection_bg = parse_hex_color(selection).unwrap_or(Rgba::rgb(0x4A, 0x4A, 0x4A));
-    
+
     ColorPalette {
         ansi: ANSI_COLORS,
         default_fg,

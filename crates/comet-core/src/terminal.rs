@@ -4,6 +4,9 @@ use crate::cell::{Attributes, Cell};
 use crate::color::Color;
 use crate::cursor::Cursor;
 use crate::grid::Grid;
+use crate::scrollback::{Row, ScrollbackBuffer};
+use crate::selection::Selection;
+use std::collections::HashMap;
 
 /// Representa uma sessão de terminal completa.
 ///
@@ -28,6 +31,13 @@ pub struct Terminal {
     pen_foreground: Color,
     pen_background: Color,
     pen_attributes: Attributes,
+    pen_hyperlink: Option<String>,
+    hyperlinks: HashMap<(usize, usize), String>,
+    scrollback: ScrollbackBuffer,
+    viewport_offset: usize, // 0 = at bottom (normal), >0 = scrolled up
+    selection: Selection,
+    clipboard_output: Option<String>,
+    bell_pending: bool,
 }
 
 impl Terminal {
@@ -42,6 +52,33 @@ impl Terminal {
             pen_foreground: Color::default(),
             pen_background: Color::default(),
             pen_attributes: Attributes::default(),
+            pen_hyperlink: None,
+            hyperlinks: HashMap::new(),
+            scrollback: ScrollbackBuffer::new(10000, width),
+            viewport_offset: 0,
+            selection: Selection::new(),
+            clipboard_output: None,
+            bell_pending: false,
+        }
+    }
+
+    /// Creates a new terminal with custom scrollback size.
+    pub fn with_scrollback(width: usize, height: usize, scrollback_size: usize) -> Self {
+        Self {
+            width,
+            height,
+            grid: Grid::new(width, height),
+            cursor: Cursor::new(),
+            pen_foreground: Color::default(),
+            pen_background: Color::default(),
+            pen_attributes: Attributes::default(),
+            pen_hyperlink: None,
+            hyperlinks: HashMap::new(),
+            scrollback: ScrollbackBuffer::new(scrollback_size, width),
+            viewport_offset: 0,
+            selection: Selection::new(),
+            clipboard_output: None,
+            bell_pending: false,
         }
     }
 
@@ -142,13 +179,24 @@ impl Terminal {
             '\n' => self.newline(),
             '\r' => self.cursor.x = 0,
             _ => {
+                let mut attrs = self.pen_attributes;
+                let has_hyperlink = self.pen_hyperlink.is_some();
+                if has_hyperlink {
+                    attrs.hyperlink = true;
+                }
                 let cell = Cell {
                     character: ch,
                     foreground: self.pen_foreground,
                     background: self.pen_background,
-                    attributes: self.pen_attributes,
+                    attributes: attrs,
                 };
+                let abs_pos = (self.scrollback.len() + self.cursor.y, self.cursor.x);
                 self.grid.set(self.cursor.x, self.cursor.y, cell);
+                if has_hyperlink {
+                    if let Some(uri) = &self.pen_hyperlink {
+                        self.hyperlinks.insert(abs_pos, uri.clone());
+                    }
+                }
                 self.advance_cursor();
             }
         }
@@ -169,12 +217,21 @@ impl Terminal {
 
     /// Move o cursor para a próxima linha, rolando a grade para cima
     /// quando o cursor já está na última linha.
+    /// Pushes the scrolled-off line to scrollback before scrolling.
     fn newline(&mut self) {
         if self.height == 0 {
             return;
         }
         if self.cursor.y + 1 >= self.height {
+            // Capture the top line before it scrolls off
+            if let Some(top_row) = self.grid.row(0) {
+                self.scrollback.push_line(Row::from_cells(top_row));
+            }
             self.grid.scroll_up();
+            // If we're scrolled up, maintain the same visual position
+            if self.viewport_offset > 0 {
+                self.viewport_offset += 1;
+            }
         } else {
             self.cursor.y += 1;
         }
@@ -196,6 +253,285 @@ impl Terminal {
     pub fn clear(&mut self) {
         self.grid.clear();
         self.cursor.move_to(0, 0);
+    }
+
+    // ========== Scrollback & Viewport Methods ==========
+
+    /// Returns a reference to the scrollback buffer.
+    pub fn scrollback(&self) -> &ScrollbackBuffer {
+        &self.scrollback
+    }
+
+    /// Returns a mutable reference to the scrollback buffer.
+    pub fn scrollback_mut(&mut self) -> &mut ScrollbackBuffer {
+        &mut self.scrollback
+    }
+
+    /// Returns the current viewport offset (0 = at bottom, >0 = scrolled up).
+    pub fn viewport_offset(&self) -> usize {
+        self.viewport_offset
+    }
+
+    /// Returns true if the viewport is at the bottom (showing live output).
+    pub fn is_at_bottom(&self) -> bool {
+        self.viewport_offset == 0
+    }
+
+    /// Scrolls the viewport up by `amount` lines.
+    /// Returns the actual number of lines scrolled.
+    pub fn scroll_viewport_up(&mut self, amount: usize) -> usize {
+        let scrolled = self.scrollback.scroll_up(amount);
+        self.viewport_offset += scrolled;
+        scrolled
+    }
+
+    /// Scrolls the viewport down by `amount` lines.
+    /// Returns the actual number of lines scrolled.
+    pub fn scroll_viewport_down(&mut self, amount: usize) -> usize {
+        let scrolled = self.scrollback.scroll_down(amount);
+        self.viewport_offset -= scrolled;
+        scrolled
+    }
+
+    /// Scrolls the viewport to the top of the scrollback.
+    pub fn scroll_viewport_to_top(&mut self) {
+        self.scrollback.scroll_to_top();
+        self.viewport_offset = self.scrollback.viewport_offset();
+    }
+
+    /// Scrolls the viewport to the bottom (live output).
+    pub fn scroll_viewport_to_bottom(&mut self) {
+        self.scrollback.scroll_to_bottom();
+        self.viewport_offset = 0;
+    }
+
+    /// Scrolls the viewport by a number of pages (heights of lines (positive = up, negative = down).
+    pub fn scroll_viewport_pages(&mut self, pages: isize) {
+        let page_size = self.height.saturating_sub(1).max(1);
+        let lines = (pages * page_size as isize).abs() as usize;
+        if pages > 0 {
+            self.scroll_viewport_up(lines);
+        } else if pages < 0 {
+            self.scroll_viewport_down(lines);
+        }
+    }
+
+    /// Returns the visible rows for rendering, accounting for viewport offset.
+    /// Returns a vector of rows (owned), starting from the top of the viewport.
+    /// When viewport_offset > 0, scrollback history is shown above the grid.
+    /// When viewport_offset == 0 (at bottom), only grid rows are returned.
+    pub fn visible_rows(&self) -> Vec<Row> {
+        let mut rows = Vec::with_capacity(self.height);
+        self.fill_visible_rows(&mut rows);
+        rows
+    }
+
+    /// Fills an existing buffer with visible rows, reusing its allocation.
+    /// The buffer is cleared and refilled with the current visible rows.
+    /// This avoids allocating a new Vec each frame.
+    pub fn fill_visible_rows(&self, rows: &mut Vec<Row>) {
+        rows.clear();
+        rows.reserve(self.height);
+        let sb_len = self.scrollback.len();
+        let n_sb = self.viewport_offset.min(sb_len);
+
+        // Scrollback lines: oldest first (top of viewport)
+        for i in 0..n_sb {
+            let sb_idx = n_sb - 1 - i;
+            if let Some(row) = self.scrollback.get_line(sb_idx) {
+                rows.push(row.clone());
+            } else {
+                rows.push(Row::new(self.width));
+            }
+        }
+
+        // Grid lines fill the rest
+        for i in n_sb..self.height {
+            let grid_row = i - n_sb;
+            if let Some(cells) = self.grid.row(grid_row) {
+                rows.push(Row::from_cells(cells));
+            } else {
+                rows.push(Row::new(self.width));
+            }
+        }
+    }
+
+    /// Converts a visible (screen) row index to an absolute row index
+    /// (suitable for use with `get_cell_absolute` and selection methods).
+    pub fn visible_row_to_absolute(&self, visible_row: usize) -> usize {
+        let sb_len = self.scrollback.len();
+        let n_sb = self.viewport_offset.min(sb_len);
+        if visible_row < n_sb {
+            n_sb - 1 - visible_row
+        } else {
+            sb_len + visible_row - n_sb
+        }
+    }
+
+    /// Converts an absolute row index to a visible (screen) row index.
+    /// Returns `None` if the absolute row is outside the visible viewport.
+    pub fn absolute_to_visible_row(&self, absolute_row: usize) -> Option<usize> {
+        let sb_len = self.scrollback.len();
+        let n_sb = self.viewport_offset.min(sb_len);
+        // Scrollback portion: absolute rows 0..n_sb are visible in reverse
+        if absolute_row < n_sb {
+            return Some(n_sb - 1 - absolute_row);
+        }
+        // Grid portion: absolute rows sb_len..sb_len+height-n_sb are visible
+        let grid_start = sb_len;
+        let grid_end = sb_len + self.height - n_sb;
+        if absolute_row >= grid_start && absolute_row < grid_end {
+            return Some(absolute_row - sb_len + n_sb);
+        }
+        None
+    }
+
+    /// Gets a cell at the given absolute position (including scrollback).
+    /// x: column, y: absolute row (0 = top of scrollback).
+    pub fn get_cell_absolute(&self, x: usize, y: usize) -> Option<&Cell> {
+        if y < self.scrollback.len() {
+            self.scrollback.get_line(y).and_then(|r| r.cells.get(x))
+        } else {
+            let grid_y = y - self.scrollback.len();
+            if grid_y < self.height {
+                self.grid.get(x, grid_y)
+            } else {
+                None
+            }
+        }
+    }
+
+    // ========== Selection Methods ==========
+
+    /// Returns a reference to the current selection.
+    pub fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// Returns a mutable reference to the selection.
+    pub fn selection_mut(&mut self) -> &mut Selection {
+        &mut self.selection
+    }
+
+    /// Starts a new selection at the given position.
+    pub fn start_selection(&mut self, col: usize, row: usize) {
+        self.selection.start(col, row);
+    }
+
+    /// Updates the selection end position.
+    pub fn update_selection(&mut self, col: usize, row: usize) {
+        self.selection.update(col, row);
+    }
+
+    /// Ends the current selection.
+    pub fn end_selection(&mut self) {
+        self.selection.end();
+    }
+
+    /// Clears the current selection.
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// Returns true if there is an active selection.
+    pub fn has_selection(&self) -> bool {
+        self.selection.is_active()
+    }
+
+    /// Returns the selected text as a string.
+    pub fn get_selection_text(&self) -> String {
+        self.selection
+            .get_text(|col, row| self.get_cell_absolute(col, row).copied())
+    }
+
+    // ========== Hyperlink Methods ==========
+
+    /// Sets the current hyperlink URI (from OSC 8 sequence).
+    /// Pass `None` to end the hyperlink.
+    pub fn set_hyperlink(&mut self, uri: Option<String>) {
+        self.pen_hyperlink = uri;
+    }
+
+    /// Returns the hyperlink URI at the given absolute position, if any.
+    pub fn get_hyperlink(&self, abs_row: usize, col: usize) -> Option<&str> {
+        self.hyperlinks.get(&(abs_row, col)).map(|s| s.as_str())
+    }
+
+    /// Returns the current pen hyperlink URI.
+    pub fn pen_hyperlink(&self) -> Option<&str> {
+        self.pen_hyperlink.as_deref()
+    }
+
+    // ========== Clipboard (OSC 52) ==========
+
+    /// Sets clipboard output content from OSC 52 sequence.
+    pub fn set_clipboard_output(&mut self, content: Option<String>) {
+        self.clipboard_output = content;
+    }
+
+    /// Takes the clipboard output content (clears it).
+    pub fn take_clipboard_output(&mut self) -> Option<String> {
+        self.clipboard_output.take()
+    }
+
+    // ========== Bell ==========
+
+    /// Returns true if a bell (BEL) is pending.
+    pub fn is_bell_pending(&self) -> bool {
+        self.bell_pending
+    }
+
+    /// Marks a bell as pending.
+    pub fn mark_bell(&mut self) {
+        self.bell_pending = true;
+    }
+
+    /// Clears the pending bell flag.
+    pub fn clear_bell(&mut self) {
+        self.bell_pending = false;
+    }
+
+    /// Expands the current selection to word boundaries.
+    pub fn expand_selection_to_word(&mut self) {
+        // Extract the bounds first to avoid borrow conflict
+        let bounds = self.selection.bounds();
+        if let Some((start_col, start_row, end_col, end_row)) = bounds {
+            // Expand start backward to word boundary
+            let mut col = start_col;
+            while col > 0 {
+                if let Some(cell) = self.get_cell_absolute(col - 1, start_row).copied() {
+                    let ch = cell.character;
+                    if ch.is_alphanumeric() || ch == '_' {
+                        col -= 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            let new_start_col = col;
+
+            // Expand end forward to word boundary
+            let mut col = end_col;
+            while let Some(cell) = self.get_cell_absolute(col, end_row).copied() {
+                let ch = cell.character;
+                if ch.is_alphanumeric() || ch == '_' {
+                    col += 1;
+                } else {
+                    break;
+                }
+            }
+            let new_end_col = col;
+
+            self.selection.set_start(new_start_col, start_row);
+            self.selection.set_end(new_end_col, end_row);
+        }
+    }
+
+    /// Expands the current selection to full lines.
+    pub fn expand_selection_to_line(&mut self) {
+        self.selection.expand_to_line();
     }
 }
 

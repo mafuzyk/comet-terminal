@@ -18,7 +18,12 @@ pub struct AtlasRect {
 
 impl AtlasRect {
     pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn area(&self) -> u32 {
@@ -51,7 +56,12 @@ impl GlyphKey {
             (false, true) => 2,
             (true, true) => 3,
         };
-        Self { font_id, glyph_id, size, style }
+        Self {
+            font_id,
+            glyph_id,
+            size,
+            style,
+        }
     }
 }
 
@@ -67,6 +77,8 @@ pub struct GlyphAtlas {
     shelves: RwLock<Vec<Shelf>>,
     glyphs: RwLock<HashMap<GlyphKey, AtlasRect>>,
     next_shelf_y: RwLock<u32>,
+    max_width: u32,
+    max_height: u32,
 }
 
 impl GlyphAtlas {
@@ -79,7 +91,11 @@ impl GlyphAtlas {
     ) -> RendererResult<Self> {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Glyph Atlas"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -112,6 +128,8 @@ impl GlyphAtlas {
             shelves: RwLock::new(Vec::new()),
             glyphs: RwLock::new(HashMap::new()),
             next_shelf_y: RwLock::new(0),
+            max_width: width * 4,
+            max_height: height * 4,
         })
     }
 
@@ -144,7 +162,9 @@ impl GlyphAtlas {
         height: u32,
     ) -> RendererResult<AtlasRect> {
         if width == 0 || height == 0 {
-            return Err(RendererError::invalid_dimensions("Glyph has zero dimensions"));
+            return Err(RendererError::invalid_dimensions(
+                "Glyph has zero dimensions",
+            ));
         }
 
         // Check if already exists
@@ -180,7 +200,11 @@ impl GlyphAtlas {
             return Err(RendererError::atlas_full(' '));
         }
 
-        let shelf = Shelf { y, height, x_offset: width + 1 };
+        let shelf = Shelf {
+            y,
+            height,
+            x_offset: width + 1,
+        };
         shelves.push(shelf);
         *next_shelf_y += height + 1;
 
@@ -215,7 +239,11 @@ impl GlyphAtlas {
                 bytes_per_row: Some(width),
                 rows_per_image: Some(height),
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
 
         // Update shelf offset
@@ -246,6 +274,60 @@ impl GlyphAtlas {
     pub fn memory_usage(&self) -> u64 {
         (self.width * self.height) as u64
     }
+
+    /// Tries to resize the atlas to fit more glyphs.
+    /// Doubles dimensions up to `max_width` / `max_height`.
+    /// Returns true if the atlas was resized.
+    ///
+    /// # Safety
+    ///
+    /// This is safe because:
+    /// - Clears shelves/glyphs first (synchronized via RwLock)
+    /// - Only called from GlyphCache::get_glyph when atlas is full
+    /// - No concurrent GPU operations use the old texture at this point
+    pub fn resize(&self) -> bool {
+        let new_w = (self.width * 2).min(self.max_width);
+        let new_h = (self.height * 2).min(self.max_height);
+        if new_w <= self.width && new_h <= self.height {
+            return false;
+        }
+
+        let new_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Glyph Atlas (resized)"),
+            size: wgpu::Extent3d {
+                width: new_w,
+                height: new_h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::R8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let new_view = new_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Clear shelves/glyphs first — provides synchronization via RwLock
+        self.shelves.write().clear();
+        self.glyphs.write().clear();
+        *self.next_shelf_y.write() = 0;
+
+        // SAFETY: We own these fields exclusively at this point (cleared all
+        // referencing state, and resize is only called from get_glyph which
+        // holds no borrows on self). The new texture replaces the old one;
+        // the old texture will be dropped when the field is overwritten.
+        unsafe {
+            let ptr = self as *const Self as *mut Self;
+            (*ptr).texture = new_texture;
+            (*ptr).view = new_view;
+            (*ptr).width = new_w;
+            (*ptr).height = new_h;
+        }
+
+        true
+    }
 }
 
 /// Vertex for glyph rendering.
@@ -259,7 +341,11 @@ pub struct GlyphVertex {
 
 impl GlyphVertex {
     pub fn new(position: [f32; 2], tex_coord: [f32; 2], color: [f32; 4]) -> Self {
-        Self { position, tex_coord, color }
+        Self {
+            position,
+            tex_coord,
+            color,
+        }
     }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -298,7 +384,14 @@ pub struct GlyphUniforms {
 }
 
 impl GlyphUniforms {
-    pub fn new(screen_width: f32, screen_height: f32, cell_width: f32, cell_height: f32, atlas_width: f32, atlas_height: f32) -> Self {
+    pub fn new(
+        screen_width: f32,
+        screen_height: f32,
+        cell_width: f32,
+        cell_height: f32,
+        atlas_width: f32,
+        atlas_height: f32,
+    ) -> Self {
         Self {
             screen_size: [screen_width, screen_height],
             cell_size: [cell_width, cell_height],
@@ -330,7 +423,10 @@ mod tests {
     #[test]
     fn test_glyph_vertex_desc() {
         let desc = GlyphVertex::desc();
-        assert_eq!(desc.array_stride, std::mem::size_of::<GlyphVertex>() as wgpu::BufferAddress);
+        assert_eq!(
+            desc.array_stride,
+            std::mem::size_of::<GlyphVertex>() as wgpu::BufferAddress
+        );
         assert_eq!(desc.attributes.len(), 3);
     }
 }

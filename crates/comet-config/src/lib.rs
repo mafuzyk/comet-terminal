@@ -2,11 +2,14 @@
 //!
 //! Handles loading, validation, and defaults for user configuration.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use directories::ProjectDirs;
+use notify::{
+    Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc::{self, Receiver};
 use thiserror::Error;
 
 /// Errors that can occur during configuration loading.
@@ -40,6 +43,16 @@ pub struct Config {
     pub renderer: RendererConfig,
     #[serde(default)]
     pub theme: ThemeConfig,
+    #[serde(default)]
+    pub terminal: TerminalConfig,
+    #[serde(default)]
+    pub behavior: BehaviorConfig,
+    #[serde(default)]
+    pub appearance: AppearanceConfig,
+    #[serde(default)]
+    pub shortcuts: ShortcutsConfig,
+    #[serde(default)]
+    pub debug: DebugConfig,
 }
 
 impl Default for Config {
@@ -51,17 +64,25 @@ impl Default for Config {
             cursor: CursorConfig::default(),
             renderer: RendererConfig::default(),
             theme: ThemeConfig::default(),
+            terminal: TerminalConfig::default(),
+            behavior: BehaviorConfig::default(),
+            appearance: AppearanceConfig::default(),
+            shortcuts: ShortcutsConfig::default(),
+            debug: DebugConfig::default(),
         }
     }
 }
 
 /// Font configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FontConfig {
     /// Font family name (e.g., "JetBrains Mono", "Fira Code", "Monospace").
     pub family: String,
     /// Font size in points.
     pub size: u16,
+    /// Enable font ligatures (requires font support).
+    #[serde(default = "default_true")]
+    pub ligatures: bool,
 }
 
 impl Default for FontConfig {
@@ -69,12 +90,13 @@ impl Default for FontConfig {
         Self {
             family: "JetBrains Mono".to_string(),
             size: 14,
+            ligatures: true,
         }
     }
 }
 
 /// Color configuration using hex strings (e.g., "#1e1e2e" or "#ffffff").
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorsConfig {
     /// Default background color.
     pub background: String,
@@ -90,7 +112,7 @@ pub struct ColorsConfig {
 }
 
 /// ANSI 16-color palette.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnsiColors {
     pub black: String,
     pub red: String,
@@ -149,12 +171,12 @@ impl AnsiColors {
 
 impl Default for ColorsConfig {
     fn default() -> Self {
-        // Catppuccin Mocha theme
+        // Mochi Galaxy — Comet's signature dark space theme
         Self {
-            background: "#1e1e2e".to_string(),
-            foreground: "#cdd6f4".to_string(),
-            cursor: "#f5e0dc".to_string(),
-            selection: "#45475a".to_string(),
+            background: "#0B1020".to_string(),
+            foreground: "#D8E4FF".to_string(),
+            cursor: "#8BE9FD".to_string(),
+            selection: "#263B66".to_string(),
             ansi: None,
         }
     }
@@ -162,24 +184,16 @@ impl Default for ColorsConfig {
 
 /// Window configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowConfig {
-    /// Window opacity (0.0 = transparent, 1.0 = opaque).
-    #[serde(default = "default_opacity")]
-    pub opacity: f32,
-}
-
-fn default_opacity() -> f32 {
-    1.0
-}
+pub struct WindowConfig {}
 
 impl Default for WindowConfig {
     fn default() -> Self {
-        Self { opacity: 1.0 }
+        Self {}
     }
 }
 
 /// Cursor configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CursorConfig {
     /// Cursor style: "block", "beam", "underline", "hollow_block", "bar".
     #[serde(default = "default_cursor_style")]
@@ -187,6 +201,9 @@ pub struct CursorConfig {
     /// Whether the cursor should blink.
     #[serde(default = "default_true")]
     pub blink: bool,
+    /// Blink interval in milliseconds.
+    #[serde(default = "default_blink_interval")]
+    pub blink_interval: u64,
 }
 
 fn default_cursor_style() -> String {
@@ -197,11 +214,16 @@ fn default_true() -> bool {
     true
 }
 
+fn default_blink_interval() -> u64 {
+    500
+}
+
 impl Default for CursorConfig {
     fn default() -> Self {
         Self {
             style: "block".to_string(),
             blink: true,
+            blink_interval: 500,
         }
     }
 }
@@ -220,6 +242,116 @@ impl Default for RendererConfig {
     }
 }
 
+/// Terminal behavior configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalConfig {
+    /// Maximum number of lines to keep in scrollback history.
+    #[serde(default = "default_scrollback")]
+    pub scrollback: usize,
+    /// Automatically copy selection to clipboard.
+    #[serde(default)]
+    pub copy_on_select: bool,
+    /// Paste on middle click.
+    #[serde(default = "default_true")]
+    pub middle_click_paste: bool,
+    /// Enable terminal bell (BEL character) visual feedback.
+    #[serde(default = "default_true")]
+    pub bell: bool,
+}
+
+fn default_scrollback() -> usize {
+    10000
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            scrollback: 10000,
+            copy_on_select: false,
+            middle_click_paste: true,
+            bell: true,
+        }
+    }
+}
+
+/// Behavior configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BehaviorConfig {
+    /// Copy selection to clipboard automatically on selection.
+    #[serde(default)]
+    pub copy_on_select: bool,
+    /// Show confirmation dialog when closing a window with multiple tabs.
+    #[serde(default)]
+    pub confirm_close: bool,
+}
+
+impl Default for BehaviorConfig {
+    fn default() -> Self {
+        Self {
+            copy_on_select: false,
+            confirm_close: false,
+        }
+    }
+}
+
+/// Window appearance configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppearanceConfig {
+    /// Window opacity (0.0 = transparent, 1.0 = opaque).
+    #[serde(default = "default_float_one")]
+    pub opacity: f32,
+    /// Enable background blur (requires compositor support).
+    #[serde(default)]
+    pub blur: bool,
+}
+
+fn default_float_one() -> f32 {
+    1.0
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            opacity: 0.95,
+            blur: true,
+        }
+    }
+}
+
+/// Keyboard shortcut configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShortcutsConfig {
+    /// Keybinding for search (e.g., "CTRL_SHIFT_F").
+    #[serde(default = "default_search_shortcut")]
+    pub search: String,
+}
+
+fn default_search_shortcut() -> String {
+    "CTRL_SHIFT_F".to_string()
+}
+
+impl Default for ShortcutsConfig {
+    fn default() -> Self {
+        Self {
+            search: default_search_shortcut(),
+        }
+    }
+}
+
+/// Debug/Diagnostics configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugConfig {
+    /// Show FPS and diagnostics overlay.
+    #[serde(default)]
+    pub show_fps: bool,
+}
+
+impl Default for DebugConfig {
+    fn default() -> Self {
+        Self { show_fps: false }
+    }
+}
+
 /// Theme configuration section in config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThemeConfig {
@@ -229,7 +361,7 @@ pub struct ThemeConfig {
 }
 
 fn default_theme_name() -> String {
-    "mochi-dark".to_string()
+    "mochi-galaxy".to_string()
 }
 
 impl Default for ThemeConfig {
@@ -254,7 +386,7 @@ pub struct Theme {
 impl Theme {
     /// Load a theme from the themes directory.
     pub fn load(name: &str) -> ConfigResult<Self> {
-        let themes_dir = Self::themes_dir()?;
+        let themes_dir = themes_dir()?;
         let path = themes_dir.join(format!("{}.toml", name));
         if !path.exists() {
             return Err(ConfigError::Validation(format!(
@@ -272,7 +404,7 @@ impl Theme {
 
     /// Get the list of available theme names.
     pub fn list_available() -> ConfigResult<Vec<String>> {
-        let themes_dir = Self::themes_dir()?;
+        let themes_dir = themes_dir()?;
         if !themes_dir.exists() {
             return Ok(vec![]);
         }
@@ -289,21 +421,52 @@ impl Theme {
         themes.sort();
         Ok(themes)
     }
+}
 
-    /// Get the themes directory path.
-    fn themes_dir() -> ConfigResult<PathBuf> {
-        let config_dir = config_dir()?;
-        Ok(config_dir.join("themes"))
-    }
+/// Get the themes directory path.
+fn themes_dir() -> ConfigResult<PathBuf> {
+    let config_dir = config_dir()?;
+    Ok(config_dir.join("themes"))
 }
 
 /// Create default themes in the themes directory.
 /// Call this on first run to populate ~/.config/comet/themes/ with built-in themes.
 pub fn ensure_default_themes() -> ConfigResult<()> {
-    let themes_dir = Theme::themes_dir()?;
+    let themes_dir = themes_dir()?;
     std::fs::create_dir_all(&themes_dir)?;
 
-    // Mochi Dark theme - Comet's signature theme
+    // Mochi Galaxy — Comet's signature theme (deep space / nebula palette)
+    let mochi_galaxy = r###"name = "mochi-galaxy"
+background = "#0B1020"
+foreground = "#D8E4FF"
+cursor = "#8BE9FD"
+selection = "#263B66"
+
+[ansi]
+black = "#101626"
+red = "#FF6B8A"
+green = "#8AFFC1"
+yellow = "#FFE28A"
+blue = "#7AA2FF"
+magenta = "#D8A7FF"
+cyan = "#7DEBFF"
+white = "#D8E4FF"
+bright_black = "#35405C"
+bright_red = "#FF8FA3"
+bright_green = "#B0FFD8"
+bright_yellow = "#FFF0B8"
+bright_blue = "#A8C1FF"
+bright_magenta = "#E8C8FF"
+bright_cyan = "#B5F4FF"
+bright_white = "#FFFFFF"
+"###;
+
+    let galaxy_path = themes_dir.join("mochi-galaxy.toml");
+    if !galaxy_path.exists() {
+        std::fs::write(&galaxy_path, mochi_galaxy)?;
+    }
+
+    // Mochi Dark theme (legacy — Comet's first theme)
     let mochi_dark = r###"name = "mochi-dark"
 background = "#1a1a2e"
 foreground = "#e0def4"
@@ -401,7 +564,7 @@ bright_white = "#c0caf5"
 
 /// Get the list of available theme names.
 pub fn list_available_themes() -> ConfigResult<Vec<String>> {
-    let themes_dir = Theme::themes_dir()?;
+    let themes_dir = themes_dir()?;
     if !themes_dir.exists() {
         return Ok(vec![]);
     }
@@ -417,12 +580,6 @@ pub fn list_available_themes() -> ConfigResult<Vec<String>> {
     }
     themes.sort();
     Ok(themes)
-}
-
-/// Get the themes directory path.
-fn themes_dir() -> ConfigResult<PathBuf> {
-    let config_dir = config_dir()?;
-    Ok(config_dir.join("themes"))
 }
 
 /// Resolve colors using priority: explicit config > theme > defaults.
@@ -454,51 +611,6 @@ impl ColorsConfig {
         } else {
             self.clone()
         }
-    }
-
-    /// Validate only the color fields (used by Theme).
-    fn validate_colors(&self) -> ConfigResult<()> {
-        use crate::ConfigError;
-        
-        // Validate color hex format
-        if !self.background.starts_with('#') || self.background.len() != 7 {
-            return Err(ConfigError::Validation(
-                "colors.background must be a 6-digit hex color (e.g., '#rrggbb')".to_string(),
-            ));
-        }
-        if !self.foreground.starts_with('#') || self.foreground.len() != 7 {
-            return Err(ConfigError::Validation(
-                "colors.foreground must be a 6-digit hex color".to_string(),
-            ));
-        }
-        if !self.cursor.starts_with('#') || self.cursor.len() != 7 {
-            return Err(ConfigError::Validation(
-                "colors.cursor must be a 6-digit hex color".to_string(),
-            ));
-        }
-        if !self.selection.starts_with('#') || self.selection.len() != 7 {
-            return Err(ConfigError::Validation(
-                "colors.selection must be a 6-digit hex color".to_string(),
-            ));
-        }
-        // Validate hex digits
-        for (name, color) in [
-            ("background", &self.background),
-            ("foreground", &self.foreground),
-            ("cursor", &self.cursor),
-            ("selection", &self.selection),
-        ] {
-            if !color[1..].chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(ConfigError::Validation(format!(
-                    "colors.{} contains invalid hex digits",
-                    name
-                )));
-            }
-        }
-        if let Some(ansi) = &self.ansi {
-            ansi.validate()?;
-        }
-        Ok(())
     }
 }
 
@@ -533,15 +645,17 @@ pub fn load_config_from(path: &std::path::Path) -> ConfigResult<Config> {
 
 /// Get the default config file path.
 pub fn config_path() -> ConfigResult<PathBuf> {
-    let proj = ProjectDirs::from("com", "comet-terminal", "comet")
-        .ok_or_else(|| ConfigError::ConfigDir("Could not determine config directory".to_string()))?;
+    let proj = ProjectDirs::from("com", "comet-terminal", "comet").ok_or_else(|| {
+        ConfigError::ConfigDir("Could not determine config directory".to_string())
+    })?;
     Ok(proj.config_dir().join("config.toml"))
 }
 
 /// Get the config directory path.
 pub fn config_dir() -> ConfigResult<PathBuf> {
-    let proj = ProjectDirs::from("com", "comet-terminal", "comet")
-        .ok_or_else(|| ConfigError::ConfigDir("Could not determine config directory".to_string()))?;
+    let proj = ProjectDirs::from("com", "comet-terminal", "comet").ok_or_else(|| {
+        ConfigError::ConfigDir("Could not determine config directory".to_string())
+    })?;
     Ok(proj.config_dir().to_path_buf())
 }
 
@@ -553,12 +667,16 @@ impl Config {
             return Err(ConfigError::Validation("font.size must be > 0".to_string()));
         }
         if self.font.size > 200 {
-            return Err(ConfigError::Validation("font.size must be <= 200".to_string()));
+            return Err(ConfigError::Validation(
+                "font.size must be <= 200".to_string(),
+            ));
         }
 
         // Opacity bounds
-        if !(0.0..=1.0).contains(&self.window.opacity) {
-            return Err(ConfigError::Validation("window.opacity must be between 0.0 and 1.0".to_string()));
+        if !(0.0..=1.0).contains(&self.appearance.opacity) {
+            return Err(ConfigError::Validation(
+                "appearance.opacity must be between 0.0 and 1.0".to_string(),
+            ));
         }
 
         // Validate color hex format
@@ -595,6 +713,24 @@ impl Config {
             )));
         }
 
+        // Terminal config validation
+        self.validate_terminal()?;
+
+        Ok(())
+    }
+
+    /// Validate terminal configuration.
+    fn validate_terminal(&self) -> ConfigResult<()> {
+        if self.terminal.scrollback == 0 {
+            return Err(ConfigError::Validation(
+                "terminal.scrollback must be > 0".to_string(),
+            ));
+        }
+        if self.terminal.scrollback > 1000000 {
+            return Err(ConfigError::Validation(
+                "terminal.scrollback must be <= 1000000".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -620,6 +756,121 @@ impl Config {
 pub fn default_config_toml() -> String {
     let config = Config::default();
     toml::to_string_pretty(&config).expect("Default config should serialize")
+}
+
+// ── Config hot-reload watcher ─────────────────────────────────────────────────
+
+/// Watches the config file for changes and signals via a channel.
+pub struct ConfigWatcher {
+    _watcher: RecommendedWatcher,
+    rx: Receiver<()>,
+}
+
+impl ConfigWatcher {
+    /// Start watching the config file for changes.
+    pub fn new() -> ConfigResult<Self> {
+        let config_path = config_path()?;
+        let (tx, rx) = mpsc::channel();
+
+        let mut watcher = RecommendedWatcher::new(
+            move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    match event.kind {
+                        EventKind::Modify(_) | EventKind::Create(_) => {
+                            let _ = tx.send(());
+                        }
+                        _ => {}
+                    }
+                }
+            },
+            NotifyConfig::default(),
+        )
+        .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
+
+        if let Some(parent) = config_path.parent() {
+            watcher
+                .watch(parent, RecursiveMode::NonRecursive)
+                .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
+        }
+
+        Ok(Self {
+            _watcher: watcher,
+            rx,
+        })
+    }
+
+    /// Check if the config file has changed since the last check.
+    /// Returns true if a change was detected (non-blocking).
+    pub fn check(&self) -> bool {
+        self.rx.try_recv().is_ok()
+    }
+
+    /// Create a no-op watcher (useful when file watching is unavailable).
+    pub fn dummy() -> Self {
+        let (tx, rx) = mpsc::channel();
+        // Drop the sender immediately so check() always returns false
+        drop(tx);
+        Self {
+            _watcher: RecommendedWatcher::new(move |_| {}, NotifyConfig::default())
+                .expect("Failed to create dummy watcher"),
+            rx,
+        }
+    }
+}
+
+// ── Session save/restore ──────────────────────────────────────────────────────
+
+/// Saved session state (window geometry, font, theme).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub window_width: u32,
+    pub window_height: u32,
+    pub window_x: Option<i32>,
+    pub window_y: Option<i32>,
+    pub font_family: String,
+    pub font_size: u16,
+    pub theme: String,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            window_width: 800,
+            window_height: 600,
+            window_x: None,
+            window_y: None,
+            font_family: "JetBrains Mono".to_string(),
+            font_size: 14,
+            theme: "mochi-galaxy".to_string(),
+        }
+    }
+}
+
+/// Get the session file path.
+fn session_path() -> ConfigResult<PathBuf> {
+    let dir = config_dir()?;
+    Ok(dir.join("session.toml"))
+}
+
+/// Load session state from disk.
+pub fn load_session() -> Session {
+    session_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Save session state to disk.
+pub fn save_session(session: &Session) {
+    if let Ok(path) = session_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(content) = toml::to_string_pretty(session) {
+            let _ = std::fs::write(&path, content);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -651,7 +902,7 @@ mod tests {
     #[test]
     fn invalid_opacity_rejected() {
         let mut config = Config::default();
-        config.window.opacity = 1.5;
+        config.appearance.opacity = 1.5;
         assert!(config.validate().is_err());
     }
 
@@ -669,7 +920,7 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
-#[test]
+    #[test]
     fn load_from_file() {
         let mut file = NamedTempFile::new().unwrap();
         let toml = r##"

@@ -3,11 +3,9 @@
 //! This module tracks which regions of the screen have changed and need
 //! to be redrawn, minimizing GPU work by only updating damaged areas.
 
-use crate::error::{RendererError, RendererResult};
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::cmp::{max, min};
-use std::ops::Range;
 
 /// A rectangular damage region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -21,7 +19,12 @@ pub struct DamageRect {
 impl DamageRect {
     /// Creates a new damage rect.
     pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Creates a damage rect from two corners.
@@ -30,22 +33,42 @@ impl DamageRect {
         let y = min(y1, y2);
         let width = max(x1, x2) - x;
         let height = max(y1, y2) - y;
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Creates a damage rect for a single cell.
     pub fn cell(x: u32, y: u32) -> Self {
-        Self { x, y, width: 1, height: 1 }
+        Self {
+            x,
+            y,
+            width: 1,
+            height: 1,
+        }
     }
 
     /// Creates a damage rect for a full row.
     pub fn row(y: u32, width: u32) -> Self {
-        Self { x: 0, y, width, height: 1 }
+        Self {
+            x: 0,
+            y,
+            width,
+            height: 1,
+        }
     }
 
     /// Creates a damage rect for a full column.
     pub fn column(x: u32, height: u32) -> Self {
-        Self { x, y: 0, width: 1, height }
+        Self {
+            x,
+            y: 0,
+            width: 1,
+            height,
+        }
     }
 
     /// Returns true if the rect is empty.
@@ -275,8 +298,8 @@ impl DamageTracker {
             && a.y < b.y + b.height
             && b.y < a.y + a.height
             || (a.y + a.height == b.y || b.y + b.height == a.y)
-            && a.x < b.x + b.width
-            && b.x < a.x + a.width
+                && a.x < b.x + b.width
+                && b.x < a.x + a.width
     }
 
     /// Distance between two rects.
@@ -414,5 +437,92 @@ mod tests {
         assert_eq!(damage[0].width, 80);
         assert_eq!(damage[0].height, 1);
         assert_eq!(damage[0].y, 5);
+    }
+
+    #[test]
+    fn test_damage_merging_adjacent_rects() {
+        let tracker = DamageTracker::new(80, 24);
+        // Two adjacent cells on same row
+        tracker.add_cell(5, 10);
+        tracker.add_cell(6, 10);
+        let damage = tracker.take_damage();
+        assert_eq!(damage.len(), 1);
+        assert_eq!(damage[0].x, 5);
+        assert_eq!(damage[0].width, 2);
+    }
+
+    #[test]
+    fn test_damage_merging_non_adjacent_rects() {
+        let tracker = DamageTracker::new(80, 24);
+        // Two non-adjacent cells
+        tracker.add_cell(0, 0);
+        tracker.add_cell(50, 10);
+        let damage = tracker.take_damage();
+        assert_eq!(damage.len(), 2);
+    }
+
+    #[test]
+    fn test_damage_clip_to_screen() {
+        let tracker = DamageTracker::new(80, 24);
+        // Outside screen
+        tracker.add_cell(100, 30);
+        assert!(tracker.is_empty());
+
+        // Partially outside
+        tracker.add(DamageRect::new(70, 20, 20, 10));
+        let damage = tracker.take_damage();
+        assert_eq!(damage.len(), 1);
+        assert_eq!(damage[0].x, 70);
+        assert_eq!(damage[0].width, 10); // clipped from 20 to 10
+    }
+
+    #[test]
+    fn test_damage_cursor_old_and_new() {
+        let tracker = DamageTracker::new(80, 24);
+        // Simulate cursor moving from (5,10) to (8,11)
+        tracker.add_cell(5, 10);
+        tracker.add_cell(8, 11);
+        let damage = tracker.take_damage();
+        assert_eq!(damage.len(), 2);
+        // Each cell should be separate (not adjacent)
+        let rects: Vec<_> = damage.iter().map(|r| (r.x, r.y)).collect();
+        assert!(rects.contains(&(5, 10)));
+        assert!(rects.contains(&(8, 11)));
+    }
+
+    #[test]
+    fn test_damage_full_mark_clears_individual() {
+        let tracker = DamageTracker::new(80, 24);
+        tracker.add_cell(5, 5);
+        tracker.mark_full();
+        assert!(tracker.is_full());
+        // Individual adds should be ignored when full
+        tracker.add_cell(10, 10);
+        assert!(tracker.is_full());
+        let _damage = tracker.take_damage();
+        // take_damage clears the full flag but does not return individual rects
+        assert!(!tracker.is_full());
+    }
+
+    #[test]
+    fn test_damage_row_range() {
+        let tracker = DamageTracker::new(80, 24);
+        tracker.add_row_range(5, 10, 20);
+        let damage = tracker.take_damage();
+        assert_eq!(damage.len(), 1);
+        assert_eq!(damage[0].x, 10);
+        assert_eq!(damage[0].width, 10);
+        assert_eq!(damage[0].y, 5);
+    }
+
+    #[test]
+    fn test_damage_contains() {
+        let outer = DamageRect::new(0, 0, 100, 100);
+        let inner = DamageRect::new(10, 10, 20, 20);
+        assert!(outer.contains(&inner));
+        assert!(!inner.contains(&outer));
+
+        let overlapping = DamageRect::new(90, 90, 20, 20);
+        assert!(!outer.contains(&overlapping));
     }
 }

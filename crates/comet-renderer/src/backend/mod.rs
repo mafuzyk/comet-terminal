@@ -40,8 +40,13 @@ pub trait HasWindowHandle:
     raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle + Send + Sync + 'static
 {
 }
-impl<T: raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle + Send + Sync + 'static>
-    HasWindowHandle for T
+impl<
+    T: raw_window_handle::HasWindowHandle
+        + raw_window_handle::HasDisplayHandle
+        + Send
+        + Sync
+        + 'static,
+> HasWindowHandle for T
 {
 }
 
@@ -109,7 +114,7 @@ pub trait RenderBackend: Send + Sync {
     fn end_frame(&mut self) -> RendererResult<()>;
 
     /// Renders the terminal context.
-    fn render(&mut self, context: &crate::renderer::RenderContext) -> RendererResult<()>;
+    fn render(&mut self, context: &mut crate::renderer::RenderContext) -> RendererResult<()>;
 
     /// Presents the frame to the screen.
     fn present(&mut self) -> RendererResult<()>;
@@ -193,5 +198,5 @@ impl BackendFactory {
     }
 }
 
-pub mod wgpu;
 pub mod cpu;
+pub mod wgpu;
