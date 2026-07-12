@@ -114,22 +114,71 @@ Configuration system with:
 
 ---
 
-## Build
+## Installation
 
-### Requirements
+### Any Linux distro (generic)
 
-- **Rust** stable toolchain (see `rust-toolchain.toml`)
-- **Linux** with Wayland (primary target; WGPU also supports X11, macOS, Windows)
+Install the required system dependencies, then compile from source:
 
-### Build and run
+| Distro | Dependencies |
+|--------|-------------|
+| Debian/Ubuntu | `sudo apt install build-essential pkg-config libxkbcommon-dev libwayland-dev libfontconfig-dev libfreetype-dev` |
+| Fedora | `sudo dnf install gcc pkg-config libxkbcommon-devel wayland-devel fontconfig-devel freetype-devel` |
+| Arch Linux | `sudo pacman -S base-devel pkg-config libxkbcommon wayland fontconfig freetype2` |
+| openSUSE | `sudo zypper install gcc pkg-config libxkbcommon-devel wayland-devel fontconfig-devel freetype2-devel` |
+| Void Linux | `sudo xbps-install base-devel pkg-config libxkbcommon-devel wayland-devel fontconfig-devel freetype-devel` |
+
+After installing dependencies, build with Cargo:
 
 ```bash
 git clone https://github.com/mafuzyk/comet-terminal
 cd comet-terminal
-
 cargo build --release
 cargo run --release
 ```
+
+### Manual compilation (any distro)
+
+Comet is a standard Rust workspace project. No special build system is needed beyond Rust and the system libraries above.
+
+```bash
+# 1. Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 2. Install system dependencies (see table above for your distro)
+
+# 3. Clone and build
+git clone https://github.com/mafuzyk/comet-terminal
+cd comet-terminal
+cargo build --release
+
+# 4. Run
+./target/release/comet
+
+# (optional) Install to ~/.cargo/bin
+cargo install --path crates/comet
+```
+
+### Nix / Flakes
+
+Comet provides a `flake.nix` for Nix users. To build and run:
+
+```bash
+# Build the package
+nix build github:mafuzyk/comet-terminal
+
+# Run directly
+nix run github:mafuzyk/comet-terminal
+
+# Or clone and use the dev shell
+git clone https://github.com/mafuzyk/comet-terminal
+cd comet-terminal
+nix develop
+cargo build --release
+cargo run --release
+```
+
+The flake also exposes `.#devShells.default` with Rust toolchain, `rustfmt`, `clippy`, and `rust-analyzer` pre-configured for development.
 
 ### Run tests
 
