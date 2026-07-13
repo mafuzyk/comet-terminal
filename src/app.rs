@@ -228,6 +228,9 @@ impl ApplicationHandler<()> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.process_events(event_loop);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

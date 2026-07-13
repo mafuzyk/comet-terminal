@@ -21,7 +21,7 @@ pub fn process_key(
     // Tab management shortcuts
     if ctrl && !alt {
         let PhysicalKey::Code(code) = physical_key else {
-            return (TabAction::None, text.map(|t| t.as_bytes().to_vec()));
+            return (TabAction::None, text.filter(|t| !t.is_empty()).map(|t| t.as_bytes().to_vec()));
         };
         match code {
             KeyCode::KeyT if !shift => return (TabAction::NewTab, None),
@@ -39,7 +39,9 @@ pub fn process_key(
 
     // Regular text input
     if let Some(text) = text {
-        return (TabAction::None, Some(text.as_bytes().to_vec()));
+        if !text.is_empty() {
+            return (TabAction::None, Some(text.as_bytes().to_vec()));
+        }
     }
 
     // Non-text key presses with modifiers
