@@ -10,10 +10,30 @@ A lightweight, tabbed terminal emulator built on [`alacritty_terminal`](https://
 - Kitty keyboard protocol support
 - TOML configuration
 
-## Building
+## Installation
+
+### From source
 
 ```sh
+git clone https://github.com/mafuzyk/comet-terminal
+cd comet-terminal
 cargo build --release
+cp target/release/comet ~/.local/bin/
+```
+
+Requires Rust 1.97+, a GPU with Vulkan/Metal/DX12 support, and the usual C build tools (`gcc`, `pkg-config`, `libfontconfig`).
+
+### Dependencies (Linux)
+
+```sh
+# Debian/Ubuntu
+sudo apt install gcc pkg-config libfontconfig-dev
+
+# Fedora
+sudo dnf install gcc pkgconfig fontconfig-devel
+
+# Arch
+sudo pacman -S gcc pkgconf fontconfig
 ```
 
 ## Configuration
