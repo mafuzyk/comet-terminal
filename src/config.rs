@@ -68,7 +68,7 @@ fn default_font_family() -> String { "monospace".into() }
 fn default_font_size() -> f32 { 12.0 }
 fn default_background() -> String { "#1a1b1e".into() }
 fn default_foreground() -> String { "#cdd6f4".into() }
-fn default_tab_bar() -> String { "#11111b".into() }
+fn default_tab_bar() -> String { "#1a1b1e".into() }
 fn default_tab_active() -> String { "#313244".into() }
 fn default_tab_inactive() -> String { "#1e1e2e".into() }
 fn default_tab_height() -> f64 { 32.0 }

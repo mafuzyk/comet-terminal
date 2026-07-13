@@ -213,6 +213,9 @@ impl ApplicationHandler<()> for App {
                     if let Some(tab) = self.tabs.get(self.active_tab) {
                         tab.write_to_pty(&bytes);
                     }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             _ => {}
