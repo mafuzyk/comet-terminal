@@ -1,10 +1,20 @@
-[workspace]
-members = [
-    "crates/comet-core",
-    "crates/comet-pty",
-    "crates/comet-renderer",
-    "crates/comet-config",
-    "crates/comet-ui",
-    "crates/comet"
-]
-resolver = "2"
+[package]
+name = "comet"
+version = "0.2.0"
+edition = "2024"
+description = "A lightweight, tabbed terminal emulator built with alacritty_terminal + WGPU"
+
+[dependencies]
+alacritty_terminal = { path = "../codes-terminal/alacritty/alacritty_terminal" }
+winit = "0.30"
+wgpu = "23"
+bytemuck = "1"
+cosmic-text = { version = "0.10", features = ["swash"] }
+swash = "0.2"
+fontdb = "0.15"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+log = "0.4"
+env_logger = "0.11"
+pollster = "0.3"
