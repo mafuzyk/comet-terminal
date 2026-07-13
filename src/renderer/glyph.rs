@@ -31,30 +31,15 @@ pub struct GlyphCache {
 }
 
 impl GlyphCache {
-    pub fn new(device: &wgpu::Device, font_family: &str, font_size: f32) -> Self {
+    pub fn new(device: &wgpu::Device, _font_family: &str, font_size: f32) -> Self {
         let mut font_system = FontSystem::new();
 
-        let font_id = font_system
-            .db_mut()
-            .query(&fontdb::Query {
-                families: &[fontdb::Family::Name(font_family.into())],
-                weight: fontdb::Weight::NORMAL,
-                stretch: fontdb::Stretch::Normal,
-                style: fontdb::Style::Normal,
-            })
-            .or_else(|| {
-                font_system.db_mut().query(&fontdb::Query {
-                    families: &[fontdb::Family::Monospace],
-                    ..fontdb::Query::default()
-                })
-            })
-            .or_else(|| {
-                font_system.db_mut().query(&fontdb::Query {
-                    families: &[fontdb::Family::SansSerif],
-                    ..fontdb::Query::default()
-                })
-            })
-            .expect("no font found");
+        let font_id = {
+            let db = font_system.db_mut();
+            let faces: Vec<_> = db.faces().map(|f| f.id).collect();
+            let mono: Vec<_> = faces.iter().filter(|&&id| db.face(id).map(|f| f.monospaced).unwrap_or(false)).collect();
+            if !mono.is_empty() { *mono[0] } else { faces[0] }
+        };
 
         let cell_width = font_size * 0.6;
         let cell_height = font_size * 1.4;

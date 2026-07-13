@@ -178,13 +178,13 @@ impl Renderer {
 
         let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cell_vertex_buf"),
-            size: 512 * 1024,
+            size: 4 * 1024 * 1024,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let index_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cell_index_buf"),
-            size: 512 * 1024,
+            size: 4 * 1024 * 1024,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
