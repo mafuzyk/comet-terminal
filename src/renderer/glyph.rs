@@ -16,6 +16,7 @@ pub struct GlyphCache {
     pub font_size: f32,
     pub cell_width: f32,
     pub cell_height: f32,
+    pub ascent: f32,
     pub descent: f32,
     pub underline_y: f32,
 
@@ -41,10 +42,9 @@ impl GlyphCache {
             if !mono.is_empty() { *mono[0] } else { faces[0] }
         };
 
-        let cell_width = font_size * 0.6;
-        let cell_height = font_size * 1.4;
-        let descent = font_size * 0.25;
-        let underline_y = font_size * 0.1;
+        let mut scale_context = ScaleContext::new();
+        let (cell_width, cell_height, ascent, descent, underline_y) =
+            Self::query_font_metrics(&mut scale_context, &mut font_system, font_id, font_size);
 
         let atlas_size = 1024u32;
         let atlas_extent = wgpu::Extent3d {
@@ -70,6 +70,7 @@ impl GlyphCache {
             font_size,
             cell_width,
             cell_height,
+            ascent,
             descent,
             underline_y,
             atlas_texture,
@@ -79,9 +80,49 @@ impl GlyphCache {
             next_y: 1,
             row_height: 0,
             map: HashMap::new(),
-            scale_context: ScaleContext::new(),
+            scale_context,
             cache_key: CacheKey::new(),
         }
+    }
+
+    fn query_font_metrics(
+        _scale_context: &mut ScaleContext,
+        font_system: &mut FontSystem,
+        font_id: fontdb::ID,
+        font_size: f32,
+    ) -> (f32, f32, f32, f32, f32) {
+        let font = match font_system.get_font(font_id) {
+            Some(f) => f,
+            None => return (font_size * 0.6, font_size * 1.2, font_size * 0.8, font_size * 0.25, font_size * 0.1),
+        };
+
+        let swash_font = swash::FontRef {
+            data: font.data(),
+            offset: font.as_swash().offset,
+            key: CacheKey::new(),
+        };
+
+        let metrics = swash_font.metrics(&[]);
+        let upm = metrics.units_per_em as f32;
+        let scale = font_size / upm;
+
+        let ascent = metrics.ascent * scale;
+        let descent = metrics.descent.abs() * scale;
+        let leading = metrics.leading * scale;
+        let cell_height = ascent + descent + leading;
+
+        let space_gid = swash_font.charmap().map(' ');
+        let mut cell_width = 0.0f32;
+        if space_gid != 0 {
+            cell_width = swash_font.glyph_metrics(&[]).advance_width(space_gid) * scale;
+        }
+        if cell_width <= 0.0 {
+            cell_width = font_size * 0.6;
+        }
+
+        let underline_y = ascent * 0.12;
+
+        (cell_width, cell_height, ascent, descent, underline_y)
     }
 
     pub fn atlas_view(&self) -> &wgpu::TextureView {
@@ -96,7 +137,7 @@ impl GlyphCache {
         if c == ' ' || c == '\t' {
             let glyph = CachedGlyph {
                 uv: [0.0, 0.0, 1.0, 1.0],
-                size: [self.cell_width, self.cell_height],
+                size: [self.cell_width, 0.0],
                 bearing: [0.0, 0.0],
             };
             self.map.insert(c, glyph);
@@ -118,13 +159,15 @@ impl GlyphCache {
         }
 
         let pad = 1u32;
-        if self.next_x + w + pad > self.atlas_size {
+        let w_u32 = w as u32;
+        let h_u32 = h as u32;
+        if self.next_x + w_u32 + pad > self.atlas_size {
             self.next_x = 1;
             self.next_y += self.row_height + pad;
             self.row_height = 0;
         }
 
-        if self.next_y + h + pad > self.atlas_size {
+        if self.next_y + h_u32 + pad > self.atlas_size {
             log::warn!("glyph atlas full, clearing cache");
             self.next_x = 1;
             self.next_y = 1;
@@ -132,7 +175,7 @@ impl GlyphCache {
             self.map.clear();
         }
 
-        self.row_height = self.row_height.max(h);
+        self.row_height = self.row_height.max(h_u32);
 
         let dx = self.next_x;
         let dy = self.next_y;
@@ -147,23 +190,23 @@ impl GlyphCache {
             &data,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(w),
-                rows_per_image: Some(h),
+                bytes_per_row: Some(w_u32),
+                rows_per_image: Some(h_u32),
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: w_u32, height: h_u32, depth_or_array_layers: 1 },
         );
 
-        self.next_x += w + pad;
+        self.next_x += w_u32 + pad;
 
         let s = self.atlas_size as f32;
-        let uv = [dx as f32 / s, dy as f32 / s, (dx + w) as f32 / s, (dy + h) as f32 / s];
+        let uv = [dx as f32 / s, dy as f32 / s, (dx + w_u32) as f32 / s, (dy + h_u32) as f32 / s];
 
         let glyph = CachedGlyph {
             uv,
             size: [w as f32, h as f32],
             bearing: [
                 placement.left as f32,
-                (self.cell_height - placement.top as f32 - self.descent),
+                self.ascent - placement.top as f32,
             ],
         };
 
@@ -186,7 +229,7 @@ impl GlyphCache {
 
         let mut scaler = self.scale_context
             .builder(swash_font)
-            .size(self.font_size * 1.5)
+            .size(self.font_size)
             .hint(true)
             .build();
 
