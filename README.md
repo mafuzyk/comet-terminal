@@ -1,8 +1,10 @@
 # Comet Terminal
 
+⚠️ **This terminal is NOT functional.** Keyboard input does not produce visible output and the tab bar has rendering issues. Use at your own risk.
+
 A lightweight, tabbed terminal emulator built on [`alacritty_terminal`](https://github.com/alacritty/alacritty) with WGPU rendering.
 
-## Features
+## Features (planned)
 
 - GPU-accelerated rendering via WGPU (Vulkan/Metal/DX12)
 - Tabbed interface (Windows Terminal style)
