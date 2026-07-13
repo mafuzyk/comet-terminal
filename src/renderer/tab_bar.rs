@@ -136,6 +136,7 @@ impl TabBarRenderer {
         tabs: &[(String, bool)],
         tab_height: f64,
         window_width: f64,
+        window_height: f64,
         bg: [f32; 4],
         active_bg: [f32; 4],
         inactive_bg: [f32; 4],
@@ -144,15 +145,22 @@ impl TabBarRenderer {
         let mut verts = Vec::new();
         let mut indices: Vec<u16> = Vec::new();
 
+        let ndc = |x: f32, y: f32| -> [f32; 2] {
+            [
+                (x / window_width as f32) * 2.0 - 1.0,
+                1.0 - (y / window_height as f32) * 2.0,
+            ]
+        };
+
         // Tab bar background
-        add_rect(&mut verts, &mut indices, 0.0, 0.0, window_width as f32, tab_height as f32, bg);
+        add_rect(&mut verts, &mut indices, &ndc, 0.0, 0.0, window_width as f32, tab_height as f32, bg);
 
         // Tab backgrounds
         let tab_w = 150.0_f32.min(window_width as f32 / tabs.len().max(1) as f32);
         for (i, (_, is_active)) in tabs.iter().enumerate() {
             let x = i as f32 * tab_w;
             let color = if *is_active { active_bg } else { inactive_bg };
-            add_rect(&mut verts, &mut indices, x, 0.0, tab_w, tab_height as f32, color);
+            add_rect(&mut verts, &mut indices, &ndc, x, 0.0, tab_w, tab_height as f32, color);
         }
 
         if verts.is_empty() {
@@ -173,6 +181,7 @@ impl TabBarRenderer {
 fn add_rect(
     verts: &mut Vec<TabVertex>,
     idx: &mut Vec<u16>,
+    ndc: &dyn Fn(f32, f32) -> [f32; 2],
     x: f32,
     y: f32,
     w: f32,
@@ -180,10 +189,14 @@ fn add_rect(
     color: [f32; 4],
 ) {
     let base = verts.len() as u16;
-    verts.push(TabVertex { position: [x, y], uv: [1.0, 1.0], color });
-    verts.push(TabVertex { position: [x + w, y], uv: [1.0, 1.0], color });
-    verts.push(TabVertex { position: [x, y + h], uv: [1.0, 1.0], color });
-    verts.push(TabVertex { position: [x + w, y + h], uv: [1.0, 1.0], color });
+    let p0 = ndc(x, y);
+    let p1 = ndc(x + w, y);
+    let p2 = ndc(x, y + h);
+    let p3 = ndc(x + w, y + h);
+    verts.push(TabVertex { position: p0, uv: [1.0, 1.0], color });
+    verts.push(TabVertex { position: p1, uv: [1.0, 1.0], color });
+    verts.push(TabVertex { position: p2, uv: [1.0, 1.0], color });
+    verts.push(TabVertex { position: p3, uv: [1.0, 1.0], color });
     idx.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
 }
 

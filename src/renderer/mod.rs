@@ -262,8 +262,16 @@ impl Renderer {
         tabs: &[(String, bool)],
     ) {
         let w = self.surface_config.width as f32;
+        let h = self.surface_config.height as f32;
         let tab_height = self.config.window.tab_height as f32;
         let term_y = tab_height;
+
+        let ndc = |x: f32, y: f32| -> [f32; 2] {
+            [
+                (x / w) * 2.0 - 1.0,
+                1.0 - (y / h) * 2.0,
+            ]
+        };
 
         let bg_rgb = Self::hex_to_rgb(&self.config.colors.background);
         let fg_rgb = Self::hex_to_rgb(&self.config.colors.foreground);
@@ -315,10 +323,14 @@ impl Renderer {
 
                 let bg_c = [bg.r as f32 / 255.0, bg.g as f32 / 255.0, bg.b as f32 / 255.0, 1.0];
                 let base = verts.len() as u16;
-                verts.push(CellVertex { position: [x, y], uv: [1.0, 1.0], color: bg_c });
-                verts.push(CellVertex { position: [x + cell_w_f, y], uv: [1.0, 1.0], color: bg_c });
-                verts.push(CellVertex { position: [x, y + cell_h], uv: [1.0, 1.0], color: bg_c });
-                verts.push(CellVertex { position: [x + cell_w_f, y + cell_h], uv: [1.0, 1.0], color: bg_c });
+                let p0 = ndc(x, y);
+                let p1 = ndc(x + cell_w_f, y);
+                let p2 = ndc(x, y + cell_h);
+                let p3 = ndc(x + cell_w_f, y + cell_h);
+                verts.push(CellVertex { position: p0, uv: [1.0, 1.0], color: bg_c });
+                verts.push(CellVertex { position: p1, uv: [1.0, 1.0], color: bg_c });
+                verts.push(CellVertex { position: p2, uv: [1.0, 1.0], color: bg_c });
+                verts.push(CellVertex { position: p3, uv: [1.0, 1.0], color: bg_c });
                 idx.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
 
                 if cell.c != ' ' && cell.c != '\t' && cell.c != '\0' {
@@ -331,10 +343,14 @@ impl Renderer {
                         let uv = glyph.uv;
 
                         let base = verts.len() as u16;
-                        verts.push(CellVertex { position: [gx, gy], uv: [uv[0], uv[1]], color: fg_c });
-                        verts.push(CellVertex { position: [gx + gw, gy], uv: [uv[2], uv[1]], color: fg_c });
-                        verts.push(CellVertex { position: [gx, gy + gh], uv: [uv[0], uv[3]], color: fg_c });
-                        verts.push(CellVertex { position: [gx + gw, gy + gh], uv: [uv[2], uv[3]], color: fg_c });
+                        let p0 = ndc(gx, gy);
+                        let p1 = ndc(gx + gw, gy);
+                        let p2 = ndc(gx, gy + gh);
+                        let p3 = ndc(gx + gw, gy + gh);
+                        verts.push(CellVertex { position: p0, uv: [uv[0], uv[1]], color: fg_c });
+                        verts.push(CellVertex { position: p1, uv: [uv[2], uv[1]], color: fg_c });
+                        verts.push(CellVertex { position: p2, uv: [uv[0], uv[3]], color: fg_c });
+                        verts.push(CellVertex { position: p3, uv: [uv[2], uv[3]], color: fg_c });
                         idx.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
                     }
                 }
@@ -343,10 +359,14 @@ impl Renderer {
                     let uy = y + self.glyph_cache.underline_y;
                     let fg_c = [fg.r as f32 / 255.0, fg.g as f32 / 255.0, fg.b as f32 / 255.0, 1.0];
                     let base = verts.len() as u16;
-                    verts.push(CellVertex { position: [x, uy], uv: [1.0, 1.0], color: fg_c });
-                    verts.push(CellVertex { position: [x + cell_w_f, uy], uv: [1.0, 1.0], color: fg_c });
-                    verts.push(CellVertex { position: [x, uy + 1.0], uv: [1.0, 1.0], color: fg_c });
-                    verts.push(CellVertex { position: [x + cell_w_f, uy + 1.0], uv: [1.0, 1.0], color: fg_c });
+                    let p0 = ndc(x, uy);
+                    let p1 = ndc(x + cell_w_f, uy);
+                    let p2 = ndc(x, uy + 1.0);
+                    let p3 = ndc(x + cell_w_f, uy + 1.0);
+                    verts.push(CellVertex { position: p0, uv: [1.0, 1.0], color: fg_c });
+                    verts.push(CellVertex { position: p1, uv: [1.0, 1.0], color: fg_c });
+                    verts.push(CellVertex { position: p2, uv: [1.0, 1.0], color: fg_c });
+                    verts.push(CellVertex { position: p3, uv: [1.0, 1.0], color: fg_c });
                     idx.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
                 }
             }
@@ -358,10 +378,14 @@ impl Renderer {
                 let cy = term_y + (cp.line.0 as f32) * cell_h;
                 let cursor_color = [0.4, 0.6, 1.0, 0.8];
                 let base = verts.len() as u16;
-                verts.push(CellVertex { position: [cx, cy], uv: [1.0, 1.0], color: cursor_color });
-                verts.push(CellVertex { position: [cx + cell_w, cy], uv: [1.0, 1.0], color: cursor_color });
-                verts.push(CellVertex { position: [cx, cy + cell_h], uv: [1.0, 1.0], color: cursor_color });
-                verts.push(CellVertex { position: [cx + cell_w, cy + cell_h], uv: [1.0, 1.0], color: cursor_color });
+                let p0 = ndc(cx, cy);
+                let p1 = ndc(cx + cell_w, cy);
+                let p2 = ndc(cx, cy + cell_h);
+                let p3 = ndc(cx + cell_w, cy + cell_h);
+                verts.push(CellVertex { position: p0, uv: [1.0, 1.0], color: cursor_color });
+                verts.push(CellVertex { position: p1, uv: [1.0, 1.0], color: cursor_color });
+                verts.push(CellVertex { position: p2, uv: [1.0, 1.0], color: cursor_color });
+                verts.push(CellVertex { position: p3, uv: [1.0, 1.0], color: cursor_color });
                 idx.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
             }
 
@@ -440,6 +464,7 @@ impl Renderer {
                 tabs,
                 self.config.window.tab_height,
                 w as f64,
+                h as f64,
                 tab_bar_bg,
                 tab_active_bg,
                 tab_inactive_bg,
